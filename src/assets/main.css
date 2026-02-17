@@ -1,0 +1,93 @@
+@import './base.css';
+
+#app {
+  width: 100%;
+  height: 100%;
+}
+
+/*
+ * Bus marker styles (global -- Leaflet injects markers outside Vue scoped styles).
+ */
+
+.bus-marker-container {
+  background: none !important;
+  border: none !important;
+}
+
+.bus-marker {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.bus-marker__dot {
+  position: relative;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--bus-color, #c62828);
+  border: 2.5px solid #ffffff;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.bus-marker__label {
+  font-family: 'Figtree', sans-serif;
+  font-size: 9px;
+  font-weight: 800;
+  color: #ffffff;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/*
+ * Arrow pointing in the direction of travel.
+ * --bearing is set inline: 0 = north (up), 90 = east (right), etc.
+ * The arrow is a triangle drawn via borders, rotated around the center
+ * of the dot so it orbits outside the circle.
+ */
+.bus-marker__arrow {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 0;
+  height: 0;
+  margin-left: -5px;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-bottom: 9px solid var(--bus-color, #c62828);
+  z-index: 1;
+  /* Rotate around center of the .bus-marker (18px from top for 36px marker) */
+  transform-origin: 5px 18px;
+  transform: rotate(var(--bearing, 0deg));
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.25));
+}
+
+/* Popup */
+.bus-popup .leaflet-popup-content-wrapper {
+  border-radius: 10px;
+  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.14);
+  padding: 0;
+  font-family: 'Figtree', sans-serif;
+}
+
+.bus-popup .leaflet-popup-content {
+  margin: 10px 14px;
+}
+
+.bus-popup .leaflet-popup-tip {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+/* Route direction arrows */
+.route-arrow {
+  background: none !important;
+  border: none !important;
+}
