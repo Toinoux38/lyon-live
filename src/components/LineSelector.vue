@@ -1,249 +1,248 @@
-<script setup>
+﻿<script setup>
 /**
- * LineSelector - iOS Maps-style bottom drawer for bus line selection.
+ * LineSelector  bottom sheet for bus line selection.
  *
- * Collapsed state: Search bar + selected/recent line badges
- * Expanded state: Full scrollable list
- * Auto-expands when search is focused to show results above keyboard
+ * Uses window.visualViewport to track the REAL available space when the
+ * virtual keyboard pushes things around. This is the only reliable technique
+ * on modern mobile browsers (iOS Safari >= 13, Chrome for Android).
+ *
+ * States:
+ *  - resting   : compact bar, ~96px, shows search pill + recent/selected badges
+ *  - open      : sheet expanded, anchored ABOVE the keyboard via visualViewport
  */
 
-import { ref, computed, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useBusStore } from '@/store/busStore'
 
-const props = defineProps({
-  isExpanded: { type: Boolean, default: false },
+const store = useBusStore()
+
+const isDesktop   = ref(false)
+const isOpen      = ref(false)
+const isSearching = ref(false)
+const search      = ref('')
+const searchEl    = ref(null)
+const sheetEl     = ref(null)
+const kbOffset    = ref(0)
+
+let dragStartY    = 0
+let dragStartOpen = false
+let isDragging    = false
+
+function onViewportResize() {
+  if (!window.visualViewport) return
+  const gap = window.innerHeight - window.visualViewport.height - window.visualViewport.offsetTop
+  kbOffset.value = Math.max(0, Math.round(gap))
+}
+
+function checkDesktop() {
+  isDesktop.value = window.innerWidth >= 769
+  if (isDesktop.value) isOpen.value = true
+}
+
+onMounted(() => {
+  checkDesktop()
+  window.addEventListener('resize', checkDesktop)
+  window.visualViewport?.addEventListener('resize', onViewportResize)
+  window.visualViewport?.addEventListener('scroll', onViewportResize)
 })
 
-const emit = defineEmits(['update:expanded'])
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', checkDesktop)
+  window.visualViewport?.removeEventListener('resize', onViewportResize)
+  window.visualViewport?.removeEventListener('scroll', onViewportResize)
+})
 
-const store = useBusStore()
-const search = ref('')
-const searchInput = ref(null)
+function openSheet()  { if (!isDesktop.value) isOpen.value = true }
+function closeSheet() {
+  if (isDesktop.value) return  // never close on desktop
+  isOpen.value      = false
+  isSearching.value = false
+  search.value      = ''
+  searchEl.value?.blur()
+}
+
+function onSearchFocus() { isSearching.value = true;  openSheet() }
+function onSearchBlur()  { setTimeout(() => { isSearching.value = false }, 200) }
+function clearSearch()   { search.value = ''; searchEl.value?.focus() }
 
 const filteredLines = computed(() => {
   const q = search.value.trim().toLowerCase()
   if (!q) return store.busLines
   return store.busLines.filter(
-    (l) =>
-      (l.sName && l.sName.toLowerCase().includes(q)) ||
-      (l.lName && l.lName.toLowerCase().includes(q)),
+    l => (l.sName?.toLowerCase().includes(q)) || (l.lName?.toLowerCase().includes(q))
   )
 })
 
-/**
- * Get currently selected lines for display in compact mode
- */
-const selectedLines = computed(() => {
-  return store.selectedIds
-    .map(id => store.lineMap[id])
-    .filter(Boolean)
-})
+const selectedLines = computed(() =>
+  store.selectedIds.map(id => store.lineMap[id]).filter(Boolean)
+)
 
-/**
- * Get recent lines (not currently selected) for display in compact mode
- */
 const recentLines = computed(() => {
-  if (selectedLines.value.length >= 3) return []
-  
+  const maxShow = Math.max(0, 4 - selectedLines.value.length)
   return store.recentLineIds
     .filter(id => !store.selectedLineIds.has(id))
     .map(id => store.lineMap[id])
     .filter(Boolean)
-    .slice(0, 3 - selectedLines.value.length)
+    .slice(0, maxShow)
 })
 
-/**
- * Parse the lName field ("Grange Blanche - Montessuy") into two endpoints.
- */
 function parseDestinations(lName) {
   if (!lName) return ['', '']
   const parts = lName.split(' - ')
-  if (parts.length >= 2) {
-    return [parts[0].trim(), parts.slice(1).join(' - ').trim()]
-  }
-  return [lName, '']
+  return parts.length >= 2
+    ? [parts[0].trim(), parts.slice(1).join(' - ').trim()]
+    : [lName, '']
 }
 
 function handleToggle(lineId) {
-  // Don't allow selecting more if max reached (unless deselecting)
   if (store.maxReached && !store.selectedLineIds.has(lineId)) return
   store.toggleLine(lineId)
 }
 
-/**
- * Auto-expand when search input is focused
- */
-function onSearchFocus() {
-  emit('update:expanded', true)
+function onDragStart(e) {
+  const t = e.touches?.[0] ?? e
+  dragStartY    = t.clientY
+  dragStartOpen = isOpen.value
+  isDragging    = true
 }
 
-/**
- * Collapse when clicking outside search while nothing typed
- */
-function onSearchBlur() {
-  if (!search.value.trim()) {
-    // Delay to allow click events to fire
-    setTimeout(() => {
-      if (!search.value.trim()) {
-        emit('update:expanded', false)
-      }
-    }, 150)
+function onDragMove(e) {
+  if (!isDragging || !sheetEl.value) return
+  const t  = e.touches?.[0] ?? e
+  const dy = Math.max(0, t.clientY - dragStartY)
+  if (isOpen.value) {
+    sheetEl.value.style.transition = 'none'
+    sheetEl.value.style.transform  = `translateY(${dy}px)`
   }
 }
 
-/**
- * Quick select from compact view
- */
-function quickSelect(lineId) {
-  handleToggle(lineId)
-}
-
-/**
- * Clear search and collapse
- */
-function clearSearch() {
-  search.value = ''
-  searchInput.value?.blur()
-  emit('update:expanded', false)
+function onDragEnd(e) {
+  if (!isDragging) return
+  isDragging = false
+  const t  = e.changedTouches?.[0] ?? e
+  const dy = t.clientY - dragStartY
+  if (sheetEl.value) {
+    sheetEl.value.style.transition = ''
+    sheetEl.value.style.transform  = ''
+  }
+  if (dy < -40 && !dragStartOpen) openSheet()
+  if (dy >  60 &&  dragStartOpen) closeSheet()
 }
 </script>
 
 <template>
-  <div class="drawer">
-    <!-- Compact bar (always visible) -->
-    <div class="drawer__compact">
-      <!-- Search bar -->
-      <div class="drawer__search-wrap" @click="onSearchFocus">
-        <svg class="drawer__search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none">
-          <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/>
-          <path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+  <Transition name="fade">
+    <div v-if="isOpen" class="ls-backdrop" @click="closeSheet" />
+  </Transition>
+
+  <div
+    ref="sheetEl"
+    class="ls-sheet"
+    :class="{ 'ls-sheet--open': isOpen }"
+    :style="{ '--kb': kbOffset + 'px' }"
+    @touchstart.passive="onDragStart"
+    @touchmove.passive="onDragMove"
+    @touchend.passive="onDragEnd"
+  >
+    <!-- Handle -->
+    <div class="ls-handle"><span class="ls-handle__pill" /></div>
+
+    <!-- Search bar -->
+    <div class="ls-search-row">
+      <div class="ls-search-box" :class="{ 'ls-search-box--focused': isSearching }">
+        <svg class="ls-search-box__icon" width="17" height="17" viewBox="0 0 24 24" fill="none">
+          <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2.2"/>
+          <path d="M16.5 16.5l4 4" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
         </svg>
         <input
-          ref="searchInput"
+          ref="searchEl"
           v-model="search"
           type="search"
-          class="drawer__search"
-          placeholder="Search bus lines..."
+          class="ls-search-box__input"
+          placeholder="Search a line"
+          enterkeyhint="search"
           autocomplete="off"
+          autocorrect="off"
+          spellcheck="false"
           @focus="onSearchFocus"
           @blur="onSearchBlur"
         />
-        <button
-          v-if="isExpanded && search"
-          class="drawer__clear-search"
-          @click.stop="clearSearch"
-        >
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <path d="M12 4L4 12M4 4l8 8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        <button v-if="search" class="ls-search-box__clear" @click.stop="clearSearch" tabindex="-1">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M1 1l12 12M13 1L1 13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
           </svg>
         </button>
       </div>
-
-      <!-- Selected + Recent lines (compact view only) -->
-      <div v-if="!isExpanded" class="drawer__quick-lines">
-        <!-- Selected lines -->
-        <button
-          v-for="line in selectedLines"
-          :key="'sel-' + line.id"
-          class="quick-line quick-line--active"
-          :style="{ background: '#' + line.color, color: '#' + line.textColor }"
-          @click="quickSelect(line.id)"
-        >
-          <span class="quick-line__badge">{{ line.sName }}</span>
-          <svg class="quick-line__check" width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path d="M3 8.5l3.5 3.5L13 4" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </button>
-
-        <!-- Recent lines -->
-        <button
-          v-for="line in recentLines"
-          :key="'rec-' + line.id"
-          class="quick-line"
-          :style="{ background: '#' + line.color, color: '#' + line.textColor }"
-          @click="quickSelect(line.id)"
-        >
-          <span class="quick-line__badge">{{ line.sName }}</span>
-        </button>
-
-        <!-- Status indicator -->
-        <div v-if="store.isPolling && store.vehicleCount > 0" class="drawer__status-mini">
-          <span class="drawer__status-dot"></span>
-          <span>{{ store.vehicleCount }}</span>
-        </div>
-      </div>
-
-      <!-- Actions in expanded mode -->
-      <div v-if="isExpanded" class="drawer__actions">
-        <button
-          class="drawer__select-all"
-          :disabled="store.maxReached"
-          @click="store.selectAll()"
-        >
-          Select {{ store.maxLines }} lines
-        </button>
-        <button
-          v-if="store.activeLineCount > 0"
-          class="drawer__clear"
-          @click="store.clearSelection()"
-        >
-          Clear all
-        </button>
-        <span v-if="store.isPolling && store.vehicleCount > 0" class="drawer__vehicle-count">
-          <span class="drawer__status-dot"></span>
-          {{ store.vehicleCount }} bus{{ store.vehicleCount !== 1 ? 'es' : '' }}
-        </span>
-      </div>
+      <button v-if="isOpen" class="ls-cancel-btn" @click="closeSheet">Cancel</button>
     </div>
 
-    <!-- Expanded list (shown when expanded) -->
-    <div v-if="isExpanded" class="drawer__list-container">
-      <!-- Loading -->
-      <div class="drawer__loading" v-if="store.isLoadingLines">
-        Loading lines...
-      </div>
+    <!-- Resting: badges -->
+    <div v-if="!isOpen" class="ls-badges">
+      <template v-if="selectedLines.length === 0 && recentLines.length === 0">
+        <span class="ls-badges__hint">Tap to pick a bus line</span>
+      </template>
+      <button
+        v-for="line in selectedLines" :key="'s' + line.id"
+        class="ls-badge ls-badge--selected"
+        :style="{ '--c': '#' + line.color, '--tc': '#' + line.textColor }"
+        @click.stop="handleToggle(line.id)"
+      >
+        <span>{{ line.sName }}</span>
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+          <path d="M2 6.5l2.5 2.5L10 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+      <button
+        v-for="line in recentLines" :key="'r' + line.id"
+        class="ls-badge ls-badge--recent"
+        :style="{ '--c': '#' + line.color, '--tc': '#' + line.textColor }"
+        @click.stop="handleToggle(line.id)"
+      >{{ line.sName }}</button>
+      <span v-if="store.isPolling && store.vehicleCount > 0" class="ls-live-pill">
+        <span class="ls-live-pill__dot" />{{ store.vehicleCount }}
+      </span>
+    </div>
 
-      <!-- Line list -->
-      <div class="drawer__list" v-else>
+    <!-- Open: actions -->
+    <div v-if="isOpen" class="ls-actions">
+      <button class="ls-actions__select" :disabled="store.maxReached" @click="store.selectAll()">
+        Select top {{ store.maxLines }}
+      </button>
+      <button v-if="store.activeLineCount > 0" class="ls-actions__clear" @click="store.clearSelection()">
+        Clear
+      </button>
+      <span v-if="store.isPolling && store.vehicleCount > 0" class="ls-live-pill ls-live-pill--sm">
+        <span class="ls-live-pill__dot" />{{ store.vehicleCount }} live
+      </span>
+    </div>
+
+    <!-- Open: list -->
+    <div v-if="isOpen" class="ls-list-wrap">
+      <div v-if="store.isLoadingLines" class="ls-loading">Loading lines</div>
+      <div v-else class="ls-list">
         <button
-          v-for="line in filteredLines"
-          :key="line.id"
-          class="line-row"
+          v-for="line in filteredLines" :key="line.id"
+          class="ls-row"
           :class="{
-            'line-row--active': store.selectedLineIds.has(line.id),
-            'line-row--disabled': store.maxReached && !store.selectedLineIds.has(line.id),
+            'ls-row--on':  store.selectedLineIds.has(line.id),
+            'ls-row--off': store.maxReached && !store.selectedLineIds.has(line.id),
           }"
           @click="handleToggle(line.id)"
         >
-          <span
-            class="line-row__badge"
-            :style="{ background: '#' + line.color, color: '#' + line.textColor }"
-          >
+          <span class="ls-row__badge" :style="{ background: '#' + line.color, color: '#' + line.textColor }">
             {{ line.sName }}
           </span>
-
-          <span class="line-row__destinations">
-            <span class="line-row__from">{{ parseDestinations(line.lName)[0] }}</span>
-            <span class="line-row__separator">
-              <svg width="14" height="10" viewBox="0 0 14 10" fill="none">
-                <path d="M0 5h14M10 1l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-              <svg width="14" height="10" viewBox="0 0 14 10" fill="none" style="transform: scaleX(-1);">
-                <path d="M0 5h14M10 1l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </span>
-            <span class="line-row__to">{{ parseDestinations(line.lName)[1] }}</span>
+          <span class="ls-row__name">
+            <span class="ls-row__from">{{ parseDestinations(line.lName)[0] }}</span>
+            <span class="ls-row__arrow"></span>
+            <span class="ls-row__to">{{ parseDestinations(line.lName)[1] }}</span>
           </span>
-
-          <span class="line-row__check" v-if="store.selectedLineIds.has(line.id)">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M3 8.5l3.5 3.5L13 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-          </span>
+          <svg v-if="store.selectedLineIds.has(line.id)" class="ls-row__check" width="18" height="18" viewBox="0 0 18 18" fill="none">
+            <path d="M3.5 9.5l4 4L14.5 5" stroke="#DC2626" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
         </button>
-
-        <p v-if="filteredLines.length === 0 && search" class="drawer__empty">
-          No lines matching "{{ search }}"
+        <p v-if="filteredLines.length === 0 && search" class="ls-empty">
+          No results for "{{ search }}"
         </p>
       </div>
     </div>
@@ -251,331 +250,214 @@ function clearSearch() {
 </template>
 
 <style scoped>
-.drawer {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  overflow: hidden;
+.ls-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  background: rgba(0,0,0,0.25);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
 }
+.fade-enter-active, .fade-leave-active { transition: opacity 0.25s ease; }
+.fade-enter-from,  .fade-leave-to     { opacity: 0; }
 
-/* -- Compact bar (always visible) -- */
-.drawer__compact {
-  flex-shrink: 0;
-  padding: 12px 16px;
-  background: #ffffff;
-}
-
-/* -- Search -- */
-.drawer__search-wrap {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 14px;
-  height: 44px;
-  background: #f4f4f5;
-  border-radius: 12px;
-  cursor: text;
-  transition: background 0.2s;
-}
-
-.drawer__search-wrap:focus-within {
-  background: #e5e7eb;
-}
-
-.drawer__search-icon {
-  flex-shrink: 0;
-  color: #9ca3af;
-}
-
-.drawer__search {
-  flex: 1;
-  border: none;
-  background: none;
-  outline: none;
-  font-size: 15px;
-  color: #1a1a1a;
-  font-family: inherit;
-}
-
-.drawer__search::placeholder {
-  color: #9ca3af;
-}
-
-.drawer__clear-search {
-  flex-shrink: 0;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  border: none;
-  background: #d1d5db;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  color: #fff;
-  transition: background 0.2s;
-}
-
-.drawer__clear-search:hover {
-  background: #9ca3af;
-}
-
-/* -- Quick lines (compact view) -- */
-.drawer__quick-lines {
-  display: flex;
-  gap: 8px;
-  margin-top: 12px;
-  flex-wrap: wrap;
-  align-items: center;
-}
-
-.quick-line {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border: none;
-  border-radius: 20px;
-  font-size: 14px;
-  font-weight: 700;
-  cursor: pointer;
-  transition: opacity 0.2s, transform 0.1s;
-  font-family: inherit;
-  -webkit-tap-highlight-color: transparent;
-}
-
-.quick-line:active {
-  transform: scale(0.95);
-}
-
-.quick-line__badge {
-  letter-spacing: 0.01em;
-}
-
-.quick-line__check {
-  flex-shrink: 0;
-  stroke-width: 2.5;
-}
-
-.quick-line--active {
-  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.15);
-}
-
-.drawer__status-mini {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: auto;
-  padding: 6px 12px;
-  background: #f4f4f5;
-  border-radius: 20px;
-  font-size: 13px;
-  font-weight: 600;
-  color: #6b7280;
-}
-
-.drawer__status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #10b981;
-  animation: pulse 2s ease-in-out infinite;
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
-}
-
-/* -- Actions (expanded mode) -- */
-.drawer__actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 10px;
-  flex-wrap: wrap;
-}
-
-.drawer__select-all {
-  border: 1.5px solid #e5e7eb;
+/*
+ * KEY: transform: translateY(calc(100% - 96px)) hides all but the top 96px
+ * (handle + search + badges). The sheet is always full-height in the DOM,
+ * so the list is already rendered and ready  no layout flash on open.
+ * bottom: var(--kb) floats the sheet above the virtual keyboard.
+ */
+.ls-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: var(--kb, 0px);
+  z-index: 1000;
   background: #fff;
-  color: #374151;
-  font-size: 12px;
-  font-weight: 600;
-  padding: 6px 12px;
-  border-radius: 8px;
-  cursor: pointer;
-  font-family: inherit;
-  transition: background 0.15s, border-color 0.15s;
-}
-
-.drawer__select-all:hover {
-  background: #f4f4f5;
-  border-color: #d1d5db;
-}
-
-.drawer__select-all:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
-.drawer__clear {
-  border: none;
-  background: #c62828;
-  color: #fff;
-  font-size: 12px;
-  font-weight: 600;
-  padding: 6px 12px;
-  border-radius: 8px;
-  cursor: pointer;
-  font-family: inherit;
-  transition: background 0.15s;
-}
-
-.drawer__clear:hover {
-  background: #b71c1c;
-}
-
-.drawer__vehicle-count {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: #6b7280;
-  font-weight: 500;
-  margin-left: auto;
-}
-
-/* -- List container (expanded mode) -- */
-.drawer__list-container {
-  flex: 1;
-  overflow: hidden;
+  border-radius: 20px 20px 0 0;
+  box-shadow: 0 -4px 32px rgba(0,0,0,0.14);
   display: flex;
   flex-direction: column;
-  min-height: 0;
+  max-height: 86dvh;
+  transform: translateY(calc(100% - 96px));
+  transition: transform 0.32s cubic-bezier(0.32,0.72,0,1), bottom 0.18s ease;
+  will-change: transform;
+  overscroll-behavior: contain;
 }
+.ls-sheet--open { transform: translateY(0); }
 
-/* -- Loading -- */
-.drawer__loading {
-  padding: 24px 16px;
-  text-align: center;
-  font-size: 14px;
-  color: #9ca3af;
-}
-
-/* -- List -- */
-.drawer__list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 0 0 16px;
-  -webkit-overflow-scrolling: touch;
-}
-
-.drawer__empty {
-  text-align: center;
-  padding: 24px 16px;
-  font-size: 14px;
-  color: #9ca3af;
-}
-
-/* -- Line Row -- */
-.line-row {
+.ls-handle {
+  flex-shrink: 0;
   display: flex;
-  align-items: center;
-  gap: 12px;
-  width: 100%;
-  padding: 10px 16px;
-  border: none;
-  background: none;
-  cursor: pointer;
-  text-align: left;
-  font-family: inherit;
-  transition: background 0.12s;
+  justify-content: center;
+  padding: 10px 0 6px;
+  cursor: grab;
   -webkit-tap-highlight-color: transparent;
 }
-
-.line-row:hover {
-  background: #fafafa;
+.ls-handle__pill {
+  width: 38px; height: 4px;
+  border-radius: 99px;
+  background: #d1d5db;
+  transition: background 0.2s;
 }
+.ls-handle:active .ls-handle__pill { background: #9ca3af; }
 
-.line-row--active {
-  background: #fef2f2;
-}
-
-.line-row--active:hover {
-  background: #fee2e2;
-}
-
-.line-row--disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
-  pointer-events: none;
-}
-
-.line-row__badge {
+.ls-search-row {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
-  justify-content: center;
-  min-width: 46px;
-  height: 30px;
-  padding: 0 8px;
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 800;
-  letter-spacing: 0.02em;
-  flex-shrink: 0;
-  white-space: nowrap;
+  gap: 10px;
+  padding: 0 14px 10px;
 }
-
-.line-row__destinations {
+.ls-search-box {
   flex: 1;
   display: flex;
   align-items: center;
-  gap: 6px;
-  min-width: 0;
-  font-size: 13px;
-  color: #374151;
-  line-height: 1.3;
+  gap: 8px;
+  height: 44px;
+  padding: 0 14px;
+  background: #f2f2f7;
+  border-radius: 12px;
+  border: 1.5px solid transparent;
+  transition: border-color 0.2s, background 0.2s;
+}
+.ls-search-box--focused { border-color: #007aff; background: #fff; }
+.ls-search-box__icon { flex-shrink: 0; color: #8e8e93; }
+.ls-search-box__input {
+  flex: 1; border: none; background: none; outline: none;
+  font-size: 16px; /* 16px prevents iOS auto-zoom */
+  color: #1c1c1e; font-family: inherit; min-width: 0;
+}
+.ls-search-box__input::placeholder { color: #8e8e93; }
+.ls-search-box__input::-webkit-search-cancel-button { display: none; }
+.ls-search-box__clear {
+  flex-shrink: 0; width: 20px; height: 20px; padding: 0;
+  border: none; background: #aeaeb2; color: #fff;
+  border-radius: 50%; display: flex; align-items: center;
+  justify-content: center; cursor: pointer; transition: background 0.15s;
+}
+.ls-search-box__clear:hover { background: #8e8e93; }
+.ls-cancel-btn {
+  flex-shrink: 0; border: none; background: none;
+  color: #007aff; font-size: 15px; font-weight: 500;
+  padding: 0 4px; cursor: pointer; font-family: inherit;
+  white-space: nowrap; -webkit-tap-highlight-color: transparent;
 }
 
-.line-row__from,
-.line-row__to {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.line-row__from {
-  flex-shrink: 1;
-  min-width: 0;
-  font-weight: 600;
-}
-
-.line-row__to {
-  flex-shrink: 1;
-  min-width: 0;
-  color: #6b7280;
-}
-
-.line-row__separator {
+.ls-badges {
   flex-shrink: 0;
-  display: flex;
-  gap: 1px;
-  color: #d1d5db;
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: 8px; padding: 0 14px 14px;
+}
+.ls-badges__hint { font-size: 13px; color: #8e8e93; }
+.ls-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 6px 13px; border: none; border-radius: 99px;
+  font-size: 13px; font-weight: 700; cursor: pointer;
+  font-family: inherit; -webkit-tap-highlight-color: transparent;
+  transition: opacity 0.15s, transform 0.1s;
+}
+.ls-badge:active { transform: scale(0.93); }
+.ls-badge--selected {
+  background: var(--c); color: var(--tc);
+  box-shadow: 0 0 0 2.5px rgba(0,0,0,0.12);
+}
+.ls-badge--recent {
+  background: color-mix(in srgb, var(--c) 14%, #f2f2f7);
+  color: color-mix(in srgb, var(--c) 75%, #1c1c1e);
+  border: 1.5px solid color-mix(in srgb, var(--c) 28%, transparent);
+}
+.ls-live-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 10px; background: #f2f2f7; border-radius: 99px;
+  font-size: 12px; font-weight: 600; color: #3a3a3c; margin-left: auto;
+}
+.ls-live-pill--sm { margin-left: auto; }
+.ls-live-pill__dot {
+  width: 7px; height: 7px; border-radius: 50%; background: #34c759;
+  animation: dot-pulse 2s ease infinite;
+}
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1; } 50% { opacity: 0.4; }
 }
 
-.line-row__check {
+.ls-actions {
   flex-shrink: 0;
-  color: #c62828;
-  display: flex;
-  align-items: center;
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 14px 10px;
+  border-bottom: 1px solid #f2f2f7;
+}
+.ls-actions__select {
+  padding: 7px 14px; border: 1.5px solid #e5e7eb; border-radius: 10px;
+  background: #fff; color: #3a3a3c; font-size: 13px; font-weight: 600;
+  cursor: pointer; font-family: inherit; transition: background 0.15s;
+}
+.ls-actions__select:hover { background: #f2f2f7; }
+.ls-actions__select:disabled { opacity: 0.35; cursor: default; }
+.ls-actions__clear {
+  padding: 7px 14px; border: none; border-radius: 10px;
+  background: #fef2f2; color: #dc2626; font-size: 13px; font-weight: 600;
+  cursor: pointer; font-family: inherit; transition: background 0.15s;
+}
+.ls-actions__clear:hover { background: #fee2e2; }
+
+.ls-list-wrap {
+  flex: 1; overflow-y: auto; overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+}
+.ls-list { padding-bottom: 24px; }
+.ls-loading, .ls-empty {
+  padding: 32px 16px; text-align: center; font-size: 14px; color: #8e8e93;
 }
 
-/* Desktop adjustments */
+.ls-row {
+  display: flex; align-items: center; gap: 12px;
+  width: 100%; padding: 11px 16px;
+  border: none; background: none; cursor: pointer;
+  text-align: left; font-family: inherit;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.1s;
+}
+.ls-row:active  { background: #f2f2f7; }
+.ls-row--on     { background: #fff1f2; }
+.ls-row--on:active { background: #fee2e2; }
+.ls-row--off    { opacity: 0.32; pointer-events: none; }
+
+.ls-row__badge {
+  flex-shrink: 0; display: inline-flex; align-items: center;
+  justify-content: center; min-width: 48px; height: 32px;
+  padding: 0 8px; border-radius: 7px; font-size: 13px;
+  font-weight: 800; letter-spacing: 0.02em; white-space: nowrap;
+}
+.ls-row__name {
+  flex: 1; min-width: 0; display: flex; align-items: center;
+  gap: 5px; font-size: 13px; color: #3a3a3c;
+}
+.ls-row__from {
+  font-weight: 600; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; min-width: 0; flex-shrink: 1;
+}
+.ls-row__to {
+  color: #8e8e93; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; min-width: 0; flex-shrink: 1;
+}
+.ls-row__arrow { flex-shrink: 0; color: #c7c7cc; font-size: 12px; }
+.ls-row__check { flex-shrink: 0; }
+
+/* Desktop: static sidebar, no sheet behavior */
 @media (min-width: 769px) {
-  .drawer__compact {
-    padding: 16px;
+  .ls-backdrop { display: none; }
+  .ls-sheet {
+    position: absolute !important;
+    top: 16px; left: 16px; right: auto;
+    width: 360px; max-height: none;
+    transform: none !important;
+    bottom: 16px !important;
+    border-radius: 16px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.12);
   }
+  .ls-handle    { display: none; }
+  .ls-cancel-btn { display: none; }
 }
 </style>
