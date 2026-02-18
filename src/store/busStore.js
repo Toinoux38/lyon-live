@@ -3,6 +3,7 @@ import { fetchLines, fetchVehiclePositions, fetchLineDirections } from '@/api/tc
 
 const POLL_INTERVAL_MS = 6000
 const MAX_SELECTED = 3
+const STORAGE_KEY = 'tcl_recent_lines'
 
 export const useBusStore = defineStore('bus', {
   state: () => ({
@@ -11,6 +12,9 @@ export const useBusStore = defineStore('bus', {
 
     /** @type {Set<string>} IDs of currently selected lines */
     selectedLineIds: new Set(),
+
+    /** @type {Array<string>} Recently selected line IDs (persisted) */
+    recentLineIds: [],
 
     /** @type {Array} Currently tracked vehicles (merged outward + return) */
     vehicles: [],
@@ -90,12 +94,52 @@ export const useBusStore = defineStore('bus', {
 
   actions: {
     /**
+     * Load recent line IDs from localStorage.
+     */
+    loadRecentLines() {
+      try {
+        const stored = localStorage.getItem(STORAGE_KEY)
+        if (stored) {
+          this.recentLineIds = JSON.parse(stored)
+        }
+      } catch (err) {
+        console.warn('[busStore] Failed to load recent lines:', err)
+        this.recentLineIds = []
+      }
+    },
+
+    /**
+     * Save recent line IDs to localStorage.
+     */
+    saveRecentLines() {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(this.recentLineIds))
+      } catch (err) {
+        console.warn('[busStore] Failed to save recent lines:', err)
+      }
+    },
+
+    /**
+     * Add a line to recent selections.
+     */
+    addToRecent(lineId) {
+      // Remove if already exists
+      this.recentLineIds = this.recentLineIds.filter(id => id !== lineId)
+      // Add to front
+      this.recentLineIds.unshift(lineId)
+      // Keep only last 5
+      this.recentLineIds = this.recentLineIds.slice(0, 5)
+      this.saveRecentLines()
+    },
+
+    /**
      * Load all lines from the API.
      */
     async loadLines() {
       if (this.isLoadingLines) return
       this.isLoadingLines = true
       this.error = null
+      this.loadRecentLines()
 
       try {
         this.lines = await fetchLines()
@@ -117,6 +161,7 @@ export const useBusStore = defineStore('bus', {
         if (this.selectedLineIds.size >= MAX_SELECTED) return // enforce limit
         this.selectedLineIds.add(lineId)
         this.loadLineRoute(lineId)
+        this.addToRecent(lineId)
       }
       this.fetchVehicles()
     },

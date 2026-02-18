@@ -2,12 +2,10 @@
 /**
  * HomeView - Main page.
  *
- * Layout: Full-screen map with a bottom drawer card for line selection.
- * The drawer has three states:
- *   - collapsed: only search bar visible (~110px)
- *   - half: scrollable list (~55% of screen)
- *   - full: nearly full screen (~90%)
- * Swipe or tap the handle to toggle between states.
+ * Mobile layout: Map with compact bottom search bar (iOS Maps style).
+ * - Collapsed: Shows search + selected line badges
+ * - Expanded: Shows full scrollable list
+ * - Auto-expands when search is focused to avoid keyboard covering results
  */
 
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
@@ -40,50 +38,42 @@ const lineColorSlots = computed(() => {
   return map
 })
 
-/** Drawer state: 'collapsed' | 'half' | 'full' */
-const drawerState = ref('collapsed')
+/** Drawer expanded state (controlled by LineSelector) */
+const isDrawerExpanded = ref(false)
 
-const drawerTransform = computed(() => {
-  const vh = window.innerHeight
-  switch (drawerState.value) {
-    case 'full': return `translateY(calc(15vh))`
-    case 'half': return `translateY(calc(50vh))`
-    default: return `translateY(calc(100vh - 120px))`
-  }
-})
-
-function cycleDrawer() {
-  const order = ['collapsed', 'half', 'full']
-  const idx = order.indexOf(drawerState.value)
-  drawerState.value = order[(idx + 1) % order.length]
+function setDrawerExpanded(value) {
+  isDrawerExpanded.value = value
 }
 
 /** Touch-drag logic for the drawer handle */
 let touchStartY = 0
-let touchStartHeight = 0
+let startExpanded = false
 
 function onTouchStart(e) {
   touchStartY = e.touches[0].clientY
-  const vh = window.innerHeight
-  switch (drawerState.value) {
-    case 'full': touchStartHeight = vh * 0.85; break
-    case 'half': touchStartHeight = vh * 0.5; break
-    default: touchStartHeight = 120; break
+  startExpanded = isDrawerExpanded.value
+}
+
+function onTouchMove(e) {
+  // Collapse if dragging down in expanded state
+  if (startExpanded) {
+    const dy = e.touches[0].clientY - touchStartY
+    if (dy > 50) {
+      isDrawerExpanded.value = false
+    }
   }
 }
 
 function onTouchEnd(e) {
-  const dy = touchStartY - e.changedTouches[0].clientY
-  const vh = window.innerHeight
-
-  if (dy > 40) {
-    // Swiped up (reduced threshold for better responsiveness)
-    if (drawerState.value === 'collapsed') drawerState.value = 'half'
-    else if (drawerState.value === 'half') drawerState.value = 'full'
-  } else if (dy < -40) {
-    // Swiped down (reduced threshold for better responsiveness)
-    if (drawerState.value === 'full') drawerState.value = 'half'
-    else if (drawerState.value === 'half') drawerState.value = 'collapsed'
+  const dy = e.touches[0].clientY - touchStartY
+  
+  // Swipe up when collapsed -> expand
+  if (!startExpanded && dy < -40) {
+    isDrawerExpanded.value = true
+  }
+  // Swipe down when expanded -> collapse
+  else if (startExpanded && dy > 40) {
+    isDrawerExpanded.value = false
   }
 }
 
@@ -174,19 +164,21 @@ watch(
       </MapView>
     </div>
 
-    <!-- Bottom drawer -->
+    <!-- Bottom drawer (iOS Maps style) -->
     <div
       class="home__drawer"
-      :class="`home__drawer--${drawerState}`"
-      :style="{ transform: drawerTransform }"
+      :class="{ 'home__drawer--expanded': isDrawerExpanded }"
     >
       <div
         class="home__drawer-handle"
-        @click="cycleDrawer"
         @touchstart.passive="onTouchStart"
+        @touchmove.passive="onTouchMove"
         @touchend.passive="onTouchEnd"
       ></div>
-      <LineSelector />
+      <LineSelector 
+        :is-expanded="isDrawerExpanded"
+        @update:expanded="setDrawerExpanded"
+      />
     </div>
   </div>
 </template>
@@ -207,23 +199,22 @@ watch(
   z-index: 0;
 }
 
-/* -- Bottom Drawer -- */
+/* -- Bottom Drawer (iOS Maps style) -- */
 .home__drawer {
   position: fixed;
-  top: 0;
+  bottom: 0;
   left: 0;
   right: 0;
-  height: 100vh;
-  height: 100dvh;
   z-index: 1000;
   background: #ffffff;
-  border-radius: 20px 20px 0 0;
-  box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.12);
+  border-radius: 16px 16px 0 0;
+  box-shadow: 0 -2px 16px rgba(0, 0, 0, 0.15);
   transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   will-change: transform;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  max-height: 85vh;
+  max-height: 85dvh;
   touch-action: pan-y;
 }
 
@@ -232,8 +223,8 @@ watch(
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 32px;
-  padding: 8px 0;
+  height: 20px;
+  padding: 8px 0 4px;
   cursor: grab;
   user-select: none;
   -webkit-user-select: none;
@@ -266,7 +257,7 @@ watch(
     left: 16px;
     right: auto;
     width: 380px;
-    height: auto !important;
+    max-height: none;
     transform: none !important;
     border-radius: 16px;
     box-shadow: 0 4px 24px rgba(0, 0, 0, 0.12);
