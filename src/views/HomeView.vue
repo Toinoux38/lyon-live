@@ -43,11 +43,12 @@ const lineColorSlots = computed(() => {
 /** Drawer state: 'collapsed' | 'half' | 'full' */
 const drawerState = ref('collapsed')
 
-const drawerHeight = computed(() => {
+const drawerTransform = computed(() => {
+  const vh = window.innerHeight
   switch (drawerState.value) {
-    case 'full': return '85dvh'
-    case 'half': return '50dvh'
-    default: return '120px'
+    case 'full': return `translateY(calc(15vh))`
+    case 'half': return `translateY(calc(50vh))`
+    default: return `translateY(calc(100vh - 120px))`
   }
 })
 
@@ -75,12 +76,12 @@ function onTouchEnd(e) {
   const dy = touchStartY - e.changedTouches[0].clientY
   const vh = window.innerHeight
 
-  if (dy > 60) {
-    // Swiped up
+  if (dy > 40) {
+    // Swiped up (reduced threshold for better responsiveness)
     if (drawerState.value === 'collapsed') drawerState.value = 'half'
     else if (drawerState.value === 'half') drawerState.value = 'full'
-  } else if (dy < -60) {
-    // Swiped down
+  } else if (dy < -40) {
+    // Swiped down (reduced threshold for better responsiveness)
     if (drawerState.value === 'full') drawerState.value = 'half'
     else if (drawerState.value === 'half') drawerState.value = 'collapsed'
   }
@@ -176,7 +177,8 @@ watch(
     <!-- Bottom drawer -->
     <div
       class="home__drawer"
-      :style="{ height: drawerHeight }"
+      :class="`home__drawer--${drawerState}`"
+      :style="{ transform: drawerTransform }"
     >
       <div
         class="home__drawer-handle"
@@ -207,18 +209,22 @@ watch(
 
 /* -- Bottom Drawer -- */
 .home__drawer {
-  position: absolute;
-  bottom: 0;
+  position: fixed;
+  top: 0;
   left: 0;
   right: 0;
+  height: 100vh;
+  height: 100dvh;
   z-index: 1000;
   background: #ffffff;
   border-radius: 20px 20px 0 0;
   box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.12);
-  transition: height 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: transform;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  touch-action: pan-y;
 }
 
 .home__drawer-handle {
@@ -226,10 +232,16 @@ watch(
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 24px;
+  height: 32px;
+  padding: 8px 0;
   cursor: grab;
   user-select: none;
   -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.home__drawer-handle:active {
+  cursor: grabbing;
 }
 
 .home__drawer-handle::after {
@@ -238,17 +250,24 @@ watch(
   height: 4px;
   border-radius: 2px;
   background: #d1d5db;
+  transition: background 0.2s;
+}
+
+.home__drawer-handle:active::after {
+  background: #9ca3af;
 }
 
 /* Desktop: drawer on the left as a sidebar card */
 @media (min-width: 769px) {
   .home__drawer {
+    position: absolute;
     top: 16px;
     bottom: 16px;
     left: 16px;
     right: auto;
     width: 380px;
     height: auto !important;
+    transform: none !important;
     border-radius: 16px;
     box-shadow: 0 4px 24px rgba(0, 0, 0, 0.12);
   }

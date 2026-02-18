@@ -44,11 +44,6 @@ function handleToggle(lineId) {
 
 <template>
   <div class="drawer">
-    <!-- Drag handle -->
-    <div class="drawer__handle-bar">
-      <div class="drawer__handle"></div>
-    </div>
-
     <!-- Search -->
     <div class="drawer__search-wrap">
       <svg class="drawer__search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none">
@@ -155,27 +150,12 @@ function handleToggle(lineId) {
   overflow: hidden;
 }
 
-/* -- Handle -- */
-.drawer__handle-bar {
-  display: flex;
-  justify-content: center;
-  padding: 10px 0 4px;
-  flex-shrink: 0;
-}
-
-.drawer__handle {
-  width: 36px;
-  height: 4px;
-  border-radius: 2px;
-  background: #d1d5db;
-}
-
 /* -- Search -- */
 .drawer__search-wrap {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 8px 16px 0;
+  margin: 0 16px 0;
   padding: 0 14px;
   height: 44px;
   background: #f4f4f5;
