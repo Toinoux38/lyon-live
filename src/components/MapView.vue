@@ -1,6 +1,6 @@
 <script setup>
 /**
- * MapView - MapLibre GL JS map wrapper.
+ * MapView - MapLibre GL JS map wrapper
  *
  * Initializes a MapLibre GL map centered on Lyon and provides the map instance
  * to child components via provide/inject.
