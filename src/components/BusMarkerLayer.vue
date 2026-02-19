@@ -14,6 +14,8 @@
 
 import { watch, inject, onMounted, onBeforeUnmount } from 'vue'
 import L from 'leaflet'
+import { useBusStore } from '@/store/busStore'
+import { calculateNextStop } from '@/utils/nextStop'
 
 /* ------------------------------------------------------------------ */
 /*  Props                                                              */
@@ -27,6 +29,7 @@ const props = defineProps({
 /*  State                                                              */
 /* ------------------------------------------------------------------ */
 const map = inject('leafletMap')
+const store = useBusStore()
 
 /**
  * Internal marker registry.
@@ -60,9 +63,9 @@ function buildIcon(bearing, color, lineName) {
   })
 }
 
-function buildPopup(v) {
-  const dir = v.direction === 'outward' ? 'Aller' : 'Retour'
-  return `<div style="font-family:'Figtree',system-ui,sans-serif;font-size:13px;line-height:1.5;min-width:100px"><div style="display:flex;align-items:center;gap:6px;margin-bottom:4px"><span style="padding:2px 8px;border-radius:4px;background:#${v.lineColor};color:#fff;font-weight:700;font-size:12px">${v.lineName || '?'}</span><span style="color:#888;font-size:12px">${dir}</span></div><span style="color:#aaa;font-size:11px">${v.latitude.toFixed(4)}, ${v.longitude.toFixed(4)}</span></div>`
+function buildPopup(v, nextStopName) {
+  const nextStop = nextStopName || '?'
+  return `<div style="font-family:'Figtree',system-ui,sans-serif;font-size:13px;line-height:1.5;min-width:120px"><div style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><span style="padding:2px 8px;border-radius:4px;background:#${v.lineColor};color:#fff;font-weight:700;font-size:12px">${v.lineName || '?'}</span><span style="color:#888;font-size:12px;flex:1;min-width:0;text-overflow:ellipsis;white-space:nowrap;overflow:hidden">${v.destination || ''}</span></div><div style="color:#666;font-size:11px;font-weight:600;margin-bottom:4px">Next Stop</div><span style="color:#333;font-size:11px">${nextStop}</span></div>`
 }
 
 /* ------------------------------------------------------------------ */
@@ -172,6 +175,10 @@ function sync(vehicles) {
     incomingIds.add(v.id)
     const existing = registry.get(v.id)
 
+    // Calculate next stop
+    const routeData = store.lineRoutes.get(v.lineId)
+    const nextStopName = routeData ? calculateNextStop(v, routeData, v.direction) : null
+
     if (existing) {
       /* ---------- UPDATE existing marker ---------- */
       const bearingChanged = existing.bearing !== v.bearing
@@ -191,8 +198,9 @@ function sync(vehicles) {
       existing.dstLat = v.latitude
       existing.dstLng = v.longitude
       existing.direction = v.direction
+      existing.nextStopName = nextStopName
 
-      existing.marker.setPopupContent(buildPopup(v))
+      existing.marker.setPopupContent(buildPopup(v, nextStopName))
     } else {
       /* ---------- ADD new marker ---------- */
       const marker = L.marker([v.latitude, v.longitude], {
@@ -200,7 +208,7 @@ function sync(vehicles) {
         zIndexOffset: 1000,
       })
 
-      marker.bindPopup(buildPopup(v), {
+      marker.bindPopup(buildPopup(v, nextStopName), {
         closeButton: false,
         className: 'bus-popup',
         offset: [0, -4],
@@ -220,6 +228,7 @@ function sync(vehicles) {
         color: v.lineColor,
         lineName: v.lineName,
         direction: v.direction,
+        nextStopName,
       })
     }
   }

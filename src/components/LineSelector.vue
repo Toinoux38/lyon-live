@@ -13,8 +13,22 @@
 
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useBusStore } from '@/store/busStore'
+import { ArrowRight, ArrowLeft, ArrowRightLeft } from 'lucide-vue-next'
 
 const store = useBusStore()
+
+// ---- direction helpers ------------------------------------------------
+const DIR_OPTS = [
+  { value: 'both',    icon: ArrowRightLeft, title: 'Aller/Retour (les deux sens)' },
+  { value: 'outward', icon: ArrowRight,     title: 'Aller (sens aller)' },
+  { value: 'return',  icon: ArrowLeft,      title: 'Retour (sens retour)' },
+]
+function directionOf(lineId) { return store.lineDirectionMap[lineId] || 'both' }
+function setDirection(lineId, dir) { store.setLineDirection(lineId, dir) }
+function dirIcon(val) {
+  const opt = DIR_OPTS.find(o => o.value === val)
+  return opt?.icon || ArrowRightLeft
+}
 
 const isDesktop   = ref(false)
 const isOpen      = ref(false)
@@ -94,6 +108,14 @@ function parseDestinations(lName) {
     : [lName, '']
 }
 
+/** filteredLines enriched with pre-parsed destinations to avoid calling parseDestinations twice per row in the template */
+const filteredLinesWithDest = computed(() =>
+  filteredLines.value.map((line) => {
+    const [from, to] = parseDestinations(line.lName)
+    return { ...line, _from: from, _to: to }
+  })
+)
+
 function handleToggle(lineId) {
   if (store.maxReached && !store.selectedLineIds.has(lineId)) return
   store.toggleLine(lineId)
@@ -140,6 +162,8 @@ function onDragEnd(e) {
     class="ls-sheet"
     :class="{ 'ls-sheet--open': isOpen }"
     :style="{ '--kb': kbOffset + 'px' }"
+    role="dialog"
+    aria-label="Sélecteur de lignes de bus"
     @touchstart.passive="onDragStart"
     @touchmove.passive="onDragMove"
     @touchend.passive="onDragEnd"
@@ -160,6 +184,7 @@ function onDragEnd(e) {
           type="search"
           class="ls-search-box__input"
           placeholder="Search a line"
+          aria-label="Search a bus line"
           enterkeyhint="search"
           autocomplete="off"
           autocorrect="off"
@@ -188,6 +213,7 @@ function onDragEnd(e) {
         @click.stop="handleToggle(line.id)"
       >
         <span>{{ line.sName }}</span>
+        <component :is="dirIcon(directionOf(line.id))" class="ls-badge__dir" />
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
           <path d="M2 6.5l2.5 2.5L10 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
@@ -216,12 +242,33 @@ function onDragEnd(e) {
       </span>
     </div>
 
+    <!-- Open: direction panel (one toggle row per selected line) -->
+    <div v-if="isOpen && selectedLines.length > 0" class="ls-dir-panel">
+      <div v-for="line in selectedLines" :key="'dp' + line.id" class="ls-dir-row">
+        <span
+          class="ls-dir-row__badge"
+          :style="{ background: '#' + line.color, color: '#' + line.textColor }"
+        >{{ line.sName }}</span>
+        <div class="ls-dir-toggle" role="group" :aria-label="'Sens ligne ' + line.sName">
+          <button
+            v-for="opt in DIR_OPTS" :key="opt.value"
+            class="ls-dir-btn"
+            :class="{ 'ls-dir-btn--active': directionOf(line.id) === opt.value }"
+            :title="opt.title"
+            @click.stop="setDirection(line.id, opt.value)"
+          >
+            <component :is="opt.icon" class="ls-dir-btn__icon" />
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- Open: list -->
     <div v-if="isOpen" class="ls-list-wrap">
       <div v-if="store.isLoadingLines" class="ls-loading">Loading lines</div>
       <div v-else class="ls-list">
         <button
-          v-for="line in filteredLines" :key="line.id"
+          v-for="line in filteredLinesWithDest" :key="line.id"
           class="ls-row"
           :class="{
             'ls-row--on':  store.selectedLineIds.has(line.id),
@@ -233,9 +280,9 @@ function onDragEnd(e) {
             {{ line.sName }}
           </span>
           <span class="ls-row__name">
-            <span class="ls-row__from">{{ parseDestinations(line.lName)[0] }}</span>
+            <span class="ls-row__from">{{ line._from }}</span>
             <span class="ls-row__arrow"></span>
-            <span class="ls-row__to">{{ parseDestinations(line.lName)[1] }}</span>
+            <span class="ls-row__to">{{ line._to }}</span>
           </span>
           <svg v-if="store.selectedLineIds.has(line.id)" class="ls-row__check" width="18" height="18" viewBox="0 0 18 18" fill="none">
             <path d="M3.5 9.5l4 4L14.5 5" stroke="#DC2626" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -362,6 +409,19 @@ function onDragEnd(e) {
   background: var(--c); color: var(--tc);
   box-shadow: 0 0 0 2.5px rgba(0,0,0,0.12);
 }
+.ls-badge__dir {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.ls-badge__dir svg {
+  width: 100%;
+  height: 100%;
+  stroke-width: 2.5;
+}
 .ls-badge--recent {
   background: color-mix(in srgb, var(--c) 14%, #f2f2f7);
   color: color-mix(in srgb, var(--c) 75%, #1c1c1e);
@@ -444,6 +504,71 @@ function onDragEnd(e) {
 }
 .ls-row__arrow { flex-shrink: 0; color: #c7c7cc; font-size: 12px; }
 .ls-row__check { flex-shrink: 0; }
+
+/* ---- Direction panel -------------------------------------------- */
+.ls-dir-panel {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 14px 10px;
+  border-bottom: 1px solid #f2f2f7;
+}
+.ls-dir-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ls-dir-row__badge {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 38px;
+  height: 26px;
+  padding: 0 7px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.ls-dir-toggle {
+  display: flex;
+  align-items: center;
+  background: #f2f2f7;
+  border-radius: 9px;
+  padding: 3px;
+  gap: 2px;
+}
+.ls-dir-btn {
+  padding: 5px 8px;
+  border: none;
+  background: none;
+  border-radius: 7px;
+  color: #6b7280;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+  -webkit-tap-highlight-color: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 32px;
+}
+.ls-dir-btn:hover { background: rgba(0,0,0,0.06); color: #1c1c1e; }
+.ls-dir-btn--active {
+  background: #fff;
+  color: #1c1c1e;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+}
+.ls-dir-btn__icon {
+  width: 18px;
+  height: 18px;
+  stroke-width: 2;
+}
 
 /* Desktop: static sidebar, no sheet behavior */
 @media (min-width: 769px) {

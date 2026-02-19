@@ -34,6 +34,7 @@ const props = defineProps({
 
 const mapContainer = ref(null)
 const mapInstance = ref(null)
+let resizeObserver = null
 
 provide('leafletMap', mapInstance)
 
@@ -60,11 +61,18 @@ onMounted(() => {
 
   mapInstance.value = map
 
-  // Fix tile rendering after container resize
-  setTimeout(() => map.invalidateSize(), 100)
+  // Use ResizeObserver to reliably invalidate map size whenever the container resizes
+  resizeObserver = new ResizeObserver(() => {
+    if (mapInstance.value) mapInstance.value.invalidateSize()
+  })
+  resizeObserver.observe(mapContainer.value)
 })
 
 onBeforeUnmount(() => {
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
   if (mapInstance.value) {
     mapInstance.value.remove()
     mapInstance.value = null

@@ -22,6 +22,9 @@ export const useBusStore = defineStore('bus', {
     /** @type {Map<string, Object>} Cached line route/direction data */
     lineRoutes: new Map(),
 
+    /** @type {Object} Per-line direction filter: lineId -> 'both'|'outward'|'return' */
+    lineDirectionMap: {},
+
     /** @type {boolean} */
     isLoadingLines: false,
 
@@ -154,9 +157,20 @@ export const useBusStore = defineStore('bus', {
     /**
      * Toggle a line in/out of the selection.
      */
+    /**
+     * Set direction filter for a selected line.
+     * @param {string} lineId
+     * @param {'both'|'outward'|'return'} direction
+     */
+    setLineDirection(lineId, direction) {
+      this.lineDirectionMap = { ...this.lineDirectionMap, [lineId]: direction }
+    },
+
     toggleLine(lineId) {
       if (this.selectedLineIds.has(lineId)) {
         this.selectedLineIds.delete(lineId)
+        const { [lineId]: _, ...rest } = this.lineDirectionMap
+        this.lineDirectionMap = rest
       } else {
         if (this.selectedLineIds.size >= MAX_SELECTED) return // enforce limit
         this.selectedLineIds.add(lineId)
@@ -184,6 +198,8 @@ export const useBusStore = defineStore('bus', {
      */
     clearSelection() {
       this.selectedLineIds.clear()
+      this.lineRoutes.clear()  // evict cached route geometry so next selection reloads fresh data
+      this.lineDirectionMap = {}
       this.vehicles = []
       this.stopPolling()
     },
@@ -222,11 +238,12 @@ export const useBusStore = defineStore('bus', {
 
     /**
      * Start polling vehicle positions.
+     * Note: does NOT immediately fetch vehicles — the caller (toggleLine / watcher)
+     * already fired fetchVehicles() to avoid a double request on the first selection.
      */
     startPolling() {
       if (this._pollTimer) return
       this.isPolling = true
-      this.fetchVehicles()
 
       this._pollTimer = setInterval(() => {
         if (this.selectedLineIds.size > 0) {

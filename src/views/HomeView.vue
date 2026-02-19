@@ -5,6 +5,7 @@ import MapView from '@/components/MapView.vue'
 import BusMarkerLayer from '@/components/BusMarkerLayer.vue'
 import LineRoute from '@/components/LineRoute.vue'
 import LineSelector from '@/components/LineSelector.vue'
+import StatusBar from '@/components/StatusBar.vue'
 
 const store = useBusStore()
 
@@ -20,24 +21,47 @@ const lineColorSlots = computed(() => {
   return map
 })
 
-const enrichedVehicles = computed(() => store.vehicles.map((v) => {
-  let matchedLineId = null
-  for (const lineId of store.selectedIds) {
-    const code = store.lineMap[lineId]?.sName
-    if (code && v.id?.includes(code)) { matchedLineId = lineId; break }
-  }
-  if (!matchedLineId && store.selectedIds.length > 0) matchedLineId = store.selectedIds[0]
-  const slot = lineColorSlots.value[matchedLineId] || SLOT_COLORS[0]
-  return {
-    ...v,
-    lineColor: (v.direction === 'return' ? slot.return : slot.outward).replace('#', ''),
-    lineName: store.lineMap[matchedLineId]?.sName || '?'
-  }
-}))
+const enrichedVehicles = computed(() =>
+  store.vehicles
+    .filter((v) => {
+      const dir = store.lineDirectionMap[v.lineId] || 'both'
+      return dir === 'both' || v.direction === dir
+    })
+    .map((v) => {
+    // v.lineId is now reliably set by fetchVehiclePositions (per-line fetch).
+    // Fall back to the first selected line only if lineId is missing/deselected.
+    const matchedLineId =
+      v.lineId && store.selectedLineIds.has(v.lineId)
+        ? v.lineId
+        : (store.selectedIds[0] ?? null)
+
+    const slot = lineColorSlots.value[matchedLineId] || SLOT_COLORS[0]
+    const line = store.lineMap[matchedLineId]
+    
+    // Parse destination from line name (e.g. "Part-Dieu - Gare Routière")
+    let destination = ''
+    if (line?.lName) {
+      const parts = line.lName.split(' - ')
+      if (v.direction === 'outward' && parts.length >= 2) {
+        destination = parts[parts.length - 1].trim()
+      } else if (v.direction === 'return' && parts.length >= 1) {
+        destination = parts[0].trim()
+      }
+    }
+
+    return {
+      ...v,
+      lineColor: (v.direction === 'return' ? slot.return : slot.outward).replace('#', ''),
+      lineName: line?.sName || '?',
+      destination,
+    }
+  }),
+)
 
 const routeLayers = computed(() => store.activeRoutes.map((r) => {
   const slot = lineColorSlots.value[r.lineId] || SLOT_COLORS[0]
-  return { lineId: r.lineId, data: r.data, outwardColor: slot.outward, returnColor: slot.return }
+  const direction = store.lineDirectionMap[r.lineId] || 'both'
+  return { lineId: r.lineId, data: r.data, outwardColor: slot.outward, returnColor: slot.return, direction }
 }))
 
 onMounted(() => store.loadLines())
@@ -55,9 +79,11 @@ watch(() => store.activeLineCount, (count) => { count > 0 ? store.startPolling()
         :route-data="route.data"
         :outward-color="route.outwardColor"
         :return-color="route.returnColor"
+        :direction="route.direction"
       />
       <BusMarkerLayer :vehicles="enrichedVehicles" />
     </MapView>
+    <StatusBar class="home__status" />
     <LineSelector />
   </div>
 </template>
@@ -73,5 +99,22 @@ watch(() => store.activeLineCount, (count) => { count > 0 ? store.startPolling()
   position: absolute;
   inset: 0;
   z-index: 0;
+}
+.home__status {
+  position: absolute;
+  bottom: 104px; /* sits above the collapsed bottom sheet (~96px) */
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1001;
+  max-width: calc(100% - 32px);
+  border-radius: 20px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.12);
+}
+@media (min-width: 769px) {
+  .home__status {
+    left: 392px; /* right of the 360px sidebar + 16px gap + 16px margin */
+    transform: none;
+    bottom: 16px;
+  }
 }
 </style>

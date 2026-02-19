@@ -15,13 +15,16 @@ import L from 'leaflet'
 const props = defineProps({
   routeData: { type: Object, required: true },
   outwardColor: { type: String, default: '#DC2626' },
-  returnColor: { type: String, default: '#F87171' },
-  lineId: { type: String, required: true },
+  returnColor:  { type: String, default: '#F87171' },
+  lineId:       { type: String, required: true },
+  /** Which directions to render: 'both' | 'outward' | 'return' */
+  direction:    { type: String, default: 'both' },
 })
 
 const map = inject('leafletMap')
 let layerGroup = null
 let zoomHandler = null
+let zoomDebounceTimer = null
 
 /* ------------------------------------------------------------------ */
 /*  Polyline decoder                                                    */
@@ -76,6 +79,66 @@ function offsetLine(coords, meters) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Compute readable text color for a given hex background color        */
+/* ------------------------------------------------------------------ */
+function pillTextColor(hex) {
+  // Always white for better readability and contrast
+  return '#ffffff'
+}
+
+/* ------------------------------------------------------------------ */
+/*  Get Lucide-style flag SVG for one-way indicator                    */
+/* ------------------------------------------------------------------ */
+function getFlagSvg() {
+  return `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:5px;display:inline-block;">
+    <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1" />
+    <line x1="4" y1="22" x2="4" y2="15" />
+  </svg>`
+}
+
+/* ------------------------------------------------------------------ */
+/*  Draw a terminus pill DivIcon at the last stop of a direction        */
+/* ------------------------------------------------------------------ */
+function addTerminusPill(stopPoints, color, group, isOneWay) {
+  if (!stopPoints || stopPoints.length === 0) return
+  const stop = stopPoints[stopPoints.length - 1]
+  const pos  = stop.position || stop
+  const lat  = pos.latitude  ?? pos.lat
+  const lng  = pos.longitude ?? pos.lon ?? pos.lng
+  if (!lat || !lng) return
+
+  const name      = stop.name || stop.label || ''
+  const textColor = '#ffffff'
+  const flagHtml  = isOneWay ? getFlagSvg() : ''
+
+  const icon = L.divIcon({
+    className: '',
+    html: `<div style="
+      position:relative;width:0;height:0;"><div style="
+      position:absolute;
+      transform:translate(-50%,-110%);
+      background:${color};
+      color:${textColor};
+      border-radius:99px;
+      padding:4px 11px;
+      font-size:11px;
+      font-weight:700;
+      white-space:nowrap;
+      box-shadow:0 2px 8px rgba(0,0,0,0.28);
+      font-family:'Figtree',sans-serif;
+      border:1.5px solid rgba(255,255,255,0.35);
+      pointer-events:none;
+      display:flex;
+      align-items:center;
+    ">${name}${flagHtml}</div></div>`,
+    iconSize:   [0, 0],
+    iconAnchor: [0, 0],
+  })
+
+  L.marker([lat, lng], { icon, interactive: false, keyboard: false }).addTo(group)
+}
+
+/* ------------------------------------------------------------------ */
 /*  Direction arrow markers along a polyline                            */
 /*  Rotation is baked into the SVG so Leaflet can't overwrite it.       */
 /* ------------------------------------------------------------------ */
@@ -119,70 +182,104 @@ function addArrows(coords, color, group) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Draw a single coord array as an offset polyline                     */
+/* ------------------------------------------------------------------ */
+function drawSegment(coords, color, offsetMeters, layerGrp) {
+  if (!coords || coords.length < 2) return
+  const offset = offsetMeters !== 0 ? offsetLine(coords, offsetMeters) : coords
+
+  L.polyline(offset, {
+    color: '#ffffff',
+    weight: 7,
+    opacity: 0.85,
+    lineCap: 'round',
+    lineJoin: 'round',
+  }).addTo(layerGrp)
+
+  L.polyline(offset, {
+    color,
+    weight: 4,
+    opacity: 1,
+    lineCap: 'round',
+    lineJoin: 'round',
+  }).addTo(layerGrp)
+}
+
+/* ------------------------------------------------------------------ */
 /*  Draw route                                                          */
 /* ------------------------------------------------------------------ */
 function drawRoute() {
   if (!map?.value) return
-  clearRoute()
-  layerGroup = L.layerGroup().addTo(map.value)
+
+  // Build the NEW group on the map first, then swap — zero flicker on zoom.
+  const newGroup = L.layerGroup().addTo(map.value)
 
   const data = props.routeData
-  if (!data) return
+  if (!data) {
+    if (layerGroup) map.value.removeLayer(layerGroup)
+    layerGroup = newGroup
+    return
+  }
 
   const directions = data.directions || data || []
   const dirArray = Array.isArray(directions) ? directions : [directions]
 
-  // Compute offset in meters from a fixed pixel size at current zoom
-  const OFFSET_PX = 5 // pixels of lateral separation
+  const OFFSET_PX = 5
   const m = map.value
-  const zoom = m.getZoom()
-  const center = m.getCenter()
-  const offsetMeters = pixelsToMeters(OFFSET_PX, center.lat, zoom)
+  const offsetMeters = pixelsToMeters(OFFSET_PX, m.getCenter().lat, m.getZoom())
+
+  // Count how many directions will actually be drawn (respects the direction prop)
+  const drawnCount = dirArray.filter((_, i) => {
+    if (props.direction === 'outward' && i === 1) return false
+    if (props.direction === 'return'  && i === 0) return false
+    return true
+  }).length
 
   for (let di = 0; di < dirArray.length; di++) {
-    const dir = dirArray[di]
+    const dir      = dirArray[di]
     const isReturn = di === 1
+
+    // Filter based on the direction prop
+    if (props.direction === 'outward' && isReturn)  continue
+    if (props.direction === 'return'  && !isReturn) continue
+
     const color = isReturn ? props.returnColor : props.outwardColor
-    const offsetSign = isReturn ? 1 : -1
+    // Only offset when BOTH directions are drawn; otherwise draw centered
+    const effectiveOffset = drawnCount > 1 ? offsetMeters * (isReturn ? 1 : -1) : 0
 
-    let coords = null
+    // ── Decode shapes ───────────────────────────────────────────────────────
+    // dir.shapes may be a single encoded string OR an array of separate strings.
+    // Each array entry is an INDEPENDENT segment (gap in service, loop, branch).
+    // We must draw them as individual polylines — flatMap-ing would join them with
+    // a straight "teleport" spike between disconnected endpoints.
+    let segments = []
 
-    // Decode shapes
     if (dir.shapes && typeof dir.shapes === 'string') {
-      coords = decodePolyline(dir.shapes)
+      segments = [decodePolyline(dir.shapes)]
     } else if (Array.isArray(dir.shapes) && dir.shapes.length > 0) {
-      coords = dir.shapes.flatMap((s) => typeof s === 'string' ? decodePolyline(s) : [])
+      segments = dir.shapes
+        .filter((s) => typeof s === 'string')
+        .map((s) => decodePolyline(s))
     }
-    if (!coords && dir.geometry && dir.geometry.coordinates) {
-      coords = dir.geometry.coordinates.map((c) => [c[1], c[0]])
+
+    if (segments.length === 0 && dir.geometry?.coordinates) {
+      segments = [dir.geometry.coordinates.map((c) => [c[1], c[0]])]
     }
 
-    if (coords && coords.length > 1) {
-      // Offset so outward and return don't overlap (zoom-adaptive)
-      const offset = dirArray.length > 1 ? offsetLine(coords, offsetMeters * offsetSign) : coords
+    // Draw each segment independently — never bridge them together
+    for (const coords of segments) {
+      drawSegment(coords, color, effectiveOffset, newGroup)
+    }
 
-      // White outline
-      L.polyline(offset, {
-        color: '#ffffff',
-        weight: 7,
-        opacity: 0.85,
-        lineCap: 'round',
-        lineJoin: 'round',
-      }).addTo(layerGroup)
+    // Direction arrows — placed along the flattened path (gaps OK for arrows)
+    if (drawnCount === 1 && segments.length > 0) {
+      addArrows(segments.flat(), color, newGroup)
+    }
 
-      // Colored line
-      L.polyline(offset, {
-        color: color,
-        weight: 4,
-        opacity: 1,
-        lineCap: 'round',
-        lineJoin: 'round',
-      }).addTo(layerGroup)
-
-      // Direction arrows (only for single-direction lines)
-      if (dirArray.length === 1) {
-        addArrows(offset, color, layerGroup)
-      }
+    // Terminus pill label at the last stop of this direction
+    if (dir.stopPoints && dir.stopPoints.length > 0) {
+      const isOneWay = drawnCount === 1
+      addTerminusPill(dir.stopPoints, color, newGroup, isOneWay)
     }
 
     // Stop markers
@@ -194,7 +291,7 @@ function drawRoute() {
         if (lat && lng) {
           L.circleMarker([lat, lng], {
             radius: 3,
-            color: color,
+            color,
             fillColor: '#ffffff',
             fillOpacity: 1,
             weight: 1.5,
@@ -204,11 +301,15 @@ function drawRoute() {
               `<span style="font-family:'Figtree',sans-serif;font-size:12px;font-weight:600;">${stop.name || stop.label || ''}</span>`,
               { closeButton: false, offset: [0, -2] },
             )
-            .addTo(layerGroup)
+            .addTo(newGroup)
         }
       }
     }
   }
+
+  // Atomic swap: only remove old group AFTER new one is fully drawn on screen
+  if (layerGroup) map.value.removeLayer(layerGroup)
+  layerGroup = newGroup
 }
 
 function clearRoute() {
@@ -220,23 +321,30 @@ function clearRoute() {
 
 onMounted(() => {
   drawRoute()
-  // Redraw on zoom so offset spacing stays consistent in pixels
+  // Debounced redraw on zoom so offset spacing stays consistent in pixels
+  // without redrawing on every intermediate zoomend step during rapid gestures
   if (map?.value) {
-    zoomHandler = () => drawRoute()
+    zoomHandler = () => {
+      clearTimeout(zoomDebounceTimer)
+      zoomDebounceTimer = setTimeout(() => drawRoute(), 150)
+    }
     map.value.on('zoomend', zoomHandler)
   }
 })
 
 onBeforeUnmount(() => {
+  clearTimeout(zoomDebounceTimer)
   if (map?.value && zoomHandler) {
     map.value.off('zoomend', zoomHandler)
   }
   clearRoute()
 })
 
-watch(() => props.routeData, drawRoute, { deep: true })
+// Route data is replaced wholesale by the store — shallow identity watch is sufficient
+watch(() => props.routeData,   drawRoute)
 watch(() => props.outwardColor, drawRoute)
-watch(() => props.returnColor, drawRoute)
+watch(() => props.returnColor,  drawRoute)
+watch(() => props.direction,    drawRoute)
 </script>
 
 <template>

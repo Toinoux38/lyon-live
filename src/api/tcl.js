@@ -77,21 +77,25 @@ export async function fetchLines() {
 export async function fetchVehiclePositions(lineIds) {
   if (!lineIds.length) return []
 
-  const joined = lineIds.join(',')
-
-  // Fire both direction requests in parallel
-  const [outward, ret] = await Promise.all([
-    get('lines/vehicleMonitoring', { lineIdsOutward: joined }),
-    get('lines/vehicleMonitoring', { lineIdsReturn: joined }),
+  // Fetch each line SEPARATELY so we can reliably tag every vehicle with the
+  // lineId it came from. A single combined request (lineIdsOutward: "C1,C13")
+  // returns a flat array with no per-vehicle line info — forcing the caller to
+  // guess via string matching, which breaks for prefix overlaps (C1 vs C13).
+  const requests = lineIds.flatMap((lineId) => [
+    get('lines/vehicleMonitoring', { lineIdsOutward: lineId })
+      .then((list) =>
+        (Array.isArray(list) ? list : []).map((v) => ({ ...v, lineId, direction: 'outward' })),
+      )
+      .catch(() => []),
+    get('lines/vehicleMonitoring', { lineIdsReturn: lineId })
+      .then((list) =>
+        (Array.isArray(list) ? list : []).map((v) => ({ ...v, lineId, direction: 'return' })),
+      )
+      .catch(() => []),
   ])
 
-  const tagDirection = (list, direction) =>
-    (Array.isArray(list) ? list : []).map((v) => ({ ...v, direction }))
-
-  return [
-    ...tagDirection(outward, 'outward'),
-    ...tagDirection(ret, 'return'),
-  ]
+  const results = await Promise.all(requests)
+  return results.flat()
 }
 
 /**
