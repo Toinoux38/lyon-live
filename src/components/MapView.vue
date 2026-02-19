@@ -1,27 +1,14 @@
 <script setup>
 /**
- * MapView - Leaflet map wrapper.
+ * MapView - MapLibre GL JS map wrapper.
  *
- * Initializes a Leaflet map centered on Lyon and provides the map instance
- * to child components via provide/inject. Child BusMarker components
- * attach themselves to this map.
+ * Initializes a MapLibre GL map centered on Lyon and provides the map instance
+ * to child components via provide/inject.
  */
 
 import { ref, provide, onMounted, onBeforeUnmount } from 'vue'
-import L from 'leaflet'
-
-/*
- * Monkey-patch Leaflet 1.9.x: Marker._animateZoom crashes with
- * "Cannot read properties of null (reading '_latLngToNewLayerPoint')"
- * when markers are added/removed mid-zoom. This is a known bug.
- * The fix: guard against this._map being null.
- * Same approach used by vue-leaflet, react-leaflet, and maplibre wrappers.
- */
-const _origAnimateZoom = L.Marker.prototype._animateZoom
-L.Marker.prototype._animateZoom = function (opt) {
-  if (!this._map) return
-  _origAnimateZoom.call(this, opt)
-}
+import maplibregl from 'maplibre-gl'
+import 'maplibre-gl/dist/maplibre-gl.css'
 
 const props = defineProps({
   /** Initial center latitude */
@@ -34,45 +21,46 @@ const props = defineProps({
 
 const mapContainer = ref(null)
 const mapInstance = ref(null)
-let resizeObserver = null
 
-provide('leafletMap', mapInstance)
+provide('maplibreMap', mapInstance)
 
 onMounted(() => {
   if (!mapContainer.value) return
 
-  const map = L.map(mapContainer.value, {
-    center: [props.centerLat, props.centerLng],
+  const map = new maplibregl.Map({
+    container: mapContainer.value,
+    style: 'https://tiles.openfreemap.org/styles/positron',
+    center: [props.centerLng, props.centerLat],
     zoom: props.zoom,
-    zoomControl: false,
     attributionControl: true,
   })
 
-  // Zoom control top-right (better for mobile)
-  L.control.zoom({ position: 'topright' }).addTo(map)
+  // Navigation control (zoom buttons) top-right
+  map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right')
 
-  // Clean, modern tile layer
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-    attribution:
-      '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
-    subdomains: 'abcd',
-    maxZoom: 19,
-  }).addTo(map)
-
-  mapInstance.value = map
-
-  // Use ResizeObserver to reliably invalidate map size whenever the container resizes
-  resizeObserver = new ResizeObserver(() => {
-    if (mapInstance.value) mapInstance.value.invalidateSize()
+  map.on('load', () => {
+    // Replace all text fonts with Metropolis
+    const style = map.getStyle()
+    for (const layer of style.layers) {
+      if (layer.layout && layer.layout['text-font']) {
+        const fonts = layer.layout['text-font']
+        const newFonts = fonts.map((f) =>
+          f.replace(/Noto Sans/gi, 'Metropolis')
+           .replace(/Roboto/gi, 'Metropolis')
+        )
+        map.setLayoutProperty(layer.id, 'text-font', newFonts)
+      }
+    }
+    mapInstance.value = map
   })
-  resizeObserver.observe(mapContainer.value)
+
+  // If map loads synchronously (style already cached), set immediately
+  if (map.loaded()) {
+    mapInstance.value = map
+  }
 })
 
 onBeforeUnmount(() => {
-  if (resizeObserver) {
-    resizeObserver.disconnect()
-    resizeObserver = null
-  }
   if (mapInstance.value) {
     mapInstance.value.remove()
     mapInstance.value = null

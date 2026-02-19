@@ -6,7 +6,7 @@
 }
 
 /*
- * Bus marker styles (global -- Leaflet injects markers outside Vue scoped styles).
+ * Bus marker styles (global -- MapLibre GL injects markers outside Vue scoped styles).
  */
 
 .bus-marker-container {
@@ -71,19 +71,15 @@
 }
 
 /* Popup */
-.bus-popup .leaflet-popup-content-wrapper {
+.bus-popup .maplibregl-popup-content {
   border-radius: 10px;
   box-shadow: 0 2px 16px rgba(0, 0, 0, 0.14);
-  padding: 0;
+  padding: 10px 14px;
   font-family: 'Figtree', sans-serif;
 }
 
-.bus-popup .leaflet-popup-content {
-  margin: 10px 14px;
-}
-
-.bus-popup .leaflet-popup-tip {
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+.bus-popup .maplibregl-popup-tip {
+  border-top-color: #fff;
 }
 
 /* Route direction arrows */

@@ -6,14 +6,14 @@
  *  1. ONE component → no per-marker Vue overhead (watchers, reactive deps).
  *  2. Diff-based sync → only add / remove / update what changed each poll.
  *  3. Single rAF animation loop → one timer drives all markers, not N timers.
- *  4. Zoom/pan guard → DEFERS all sync + animation while the map is zooming
- *     or panning so Leaflet stays in full control of marker DOM elements.
- *  5. Icon reuse → only rebuild the DivIcon when bearing or color changes.
- *  6. Safe marker ops → every setLatLng/removeLayer guarded against null _map.
+ *  4. Zoom/pan guard → DEFERS all sync + animation while the map is moving.
+ *  5. DOM marker reuse → only rebuild the element when bearing or color changes.
+ *
+ * Uses MapLibre GL JS markers (DOM-based) for bus positions.
  */
 
 import { watch, inject, onMounted, onBeforeUnmount } from 'vue'
-import L from 'leaflet'
+import maplibregl from 'maplibre-gl'
 import { useBusStore } from '@/store/busStore'
 import { calculateNextStop } from '@/utils/nextStop'
 
@@ -28,19 +28,18 @@ const props = defineProps({
 /* ------------------------------------------------------------------ */
 /*  State                                                              */
 /* ------------------------------------------------------------------ */
-const map = inject('leafletMap')
+const map = inject('maplibreMap')
 const store = useBusStore()
 
 /**
  * Internal marker registry.
  * Map<vehicleId, {
- *   marker, lat, lng, srcLat, srcLng, dstLat, dstLng,
+ *   marker, popup, element, lat, lng, srcLat, srcLng, dstLat, dstLng,
  *   bearing, color, lineName, direction
  * }>
  */
 const registry = new Map()
 
-let layerGroup = null
 let animFrameId = null
 let animStart = 0
 let mapBusy = false          // true while zoom / pan animation is in flight
@@ -49,38 +48,33 @@ let pendingVehicles = null   // buffered data received while map is busy
 const ANIM_MS = 2200         // duration of position interpolation
 
 /* ------------------------------------------------------------------ */
-/*  Icon factory                                                       */
+/*  DOM element factory for bus markers                                */
 /* ------------------------------------------------------------------ */
-function buildIcon(bearing, color, lineName) {
+function buildElement(bearing, color, lineName) {
   const deg = ((bearing || 0) + 180) % 360
   const bg = `#${color}`
-  return L.divIcon({
-    className: 'bus-marker-container',
-    html: `<div class="bus-marker" style="--bus-color:${bg};--bearing:${deg}deg"><div class="bus-marker__arrow"></div><div class="bus-marker__dot"><span class="bus-marker__label">${lineName || ''}</span></div></div>`,
-    iconSize: [36, 36],
-    iconAnchor: [18, 18],
-    popupAnchor: [0, -20],
-  })
+  const el = document.createElement('div')
+  el.className = 'bus-marker-container'
+  el.innerHTML = `<div class="bus-marker" style="--bus-color:${bg};--bearing:${deg}deg"><div class="bus-marker__arrow"></div><div class="bus-marker__dot"><span class="bus-marker__label">${lineName || ''}</span></div></div>`
+  el.style.cursor = 'pointer'
+  return el
 }
 
-function buildPopup(v, nextStopName) {
+function updateElement(el, bearing, color, lineName) {
+  const deg = ((bearing || 0) + 180) % 360
+  const bg = `#${color}`
+  const inner = el.querySelector('.bus-marker')
+  if (inner) {
+    inner.style.setProperty('--bus-color', bg)
+    inner.style.setProperty('--bearing', `${deg}deg`)
+    const label = inner.querySelector('.bus-marker__label')
+    if (label) label.textContent = lineName || ''
+  }
+}
+
+function buildPopupHtml(v, nextStopName) {
   const nextStop = nextStopName || '?'
   return `<div style="font-family:'Figtree',system-ui,sans-serif;font-size:13px;line-height:1.5;min-width:120px"><div style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><span style="padding:2px 8px;border-radius:4px;background:#${v.lineColor};color:#fff;font-weight:700;font-size:12px">${v.lineName || '?'}</span><span style="color:#888;font-size:12px;flex:1;min-width:0;text-overflow:ellipsis;white-space:nowrap;overflow:hidden">${v.destination || ''}</span></div><div style="color:#666;font-size:11px;font-weight:600;margin-bottom:4px">Next Stop</div><span style="color:#333;font-size:11px">${nextStop}</span></div>`
-}
-
-/* ------------------------------------------------------------------ */
-/*  Safe marker helpers                                                */
-/* ------------------------------------------------------------------ */
-/** setLatLng only if marker is still attached to the map. */
-function safeSetLatLng(marker, lat, lng) {
-  if (marker._map) marker.setLatLng([lat, lng])
-}
-
-/** Remove marker from layerGroup only if it's still on a map. */
-function safeRemove(marker) {
-  if (marker._map && layerGroup) {
-    layerGroup.removeLayer(marker)
-  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -89,7 +83,6 @@ function safeRemove(marker) {
 function onBusy() {
   mapBusy = true
   cancelAnim()
-  // Do NOT call snapAll/setLatLng during zoom — let Leaflet handle everything
 }
 
 function onIdle() {
@@ -103,13 +96,13 @@ function onIdle() {
 }
 
 function bindMapEvents(m) {
-  m.on('zoomstart movestart', onBusy)
-  m.on('zoomend moveend', onIdle)
+  m.on('movestart', onBusy)
+  m.on('moveend', onIdle)
 }
 
 function unbindMapEvents(m) {
-  m.off('zoomstart movestart', onBusy)
-  m.off('zoomend moveend', onIdle)
+  m.off('movestart', onBusy)
+  m.off('moveend', onIdle)
 }
 
 /* ------------------------------------------------------------------ */
@@ -139,7 +132,7 @@ function startAnim() {
       if (s.lat === s.dstLat && s.lng === s.dstLng) continue
       const newLat = s.srcLat + (s.dstLat - s.srcLat) * ease
       const newLng = s.srcLng + (s.dstLng - s.srcLng) * ease
-      safeSetLatLng(s.marker, newLat, newLng)
+      s.marker.setLngLat([newLng, newLat])
 
       if (t >= 1) {
         s.lat = s.dstLat
@@ -161,7 +154,7 @@ function startAnim() {
 /*  Diff-sync: reconcile registry with incoming vehicle array           */
 /* ------------------------------------------------------------------ */
 function sync(vehicles) {
-  if (!map?.value || !layerGroup) return
+  if (!map?.value) return
 
   // If the map is mid-zoom/pan, buffer data and apply after idle
   if (mapBusy) {
@@ -186,7 +179,7 @@ function sync(vehicles) {
       const nameChanged    = existing.lineName !== v.lineName
 
       if (bearingChanged || colorChanged || nameChanged) {
-        existing.marker.setIcon(buildIcon(v.bearing, v.lineColor, v.lineName))
+        updateElement(existing.element, v.bearing, v.lineColor, v.lineName)
         existing.bearing  = v.bearing
         existing.color    = v.lineColor
         existing.lineName = v.lineName
@@ -200,24 +193,31 @@ function sync(vehicles) {
       existing.direction = v.direction
       existing.nextStopName = nextStopName
 
-      existing.marker.setPopupContent(buildPopup(v, nextStopName))
+      // Update popup content
+      existing.popup.setHTML(buildPopupHtml(v, nextStopName))
     } else {
       /* ---------- ADD new marker ---------- */
-      const marker = L.marker([v.latitude, v.longitude], {
-        icon: buildIcon(v.bearing, v.lineColor, v.lineName),
-        zIndexOffset: 1000,
-      })
+      const element = buildElement(v.bearing, v.lineColor, v.lineName)
 
-      marker.bindPopup(buildPopup(v, nextStopName), {
+      const popup = new maplibregl.Popup({
         closeButton: false,
+        offset: [0, -20],
         className: 'bus-popup',
-        offset: [0, -4],
-      })
+      }).setHTML(buildPopupHtml(v, nextStopName))
 
-      marker.addTo(layerGroup)
+      const marker = new maplibregl.Marker({ element, anchor: 'center' })
+        .setLngLat([v.longitude, v.latitude])
+        .setPopup(popup)
+        .addTo(map.value)
+
+      // Show popup on hover
+      element.addEventListener('mouseenter', () => marker.togglePopup())
+      element.addEventListener('mouseleave', () => popup.remove())
 
       registry.set(v.id, {
         marker,
+        popup,
+        element,
         lat: v.latitude,
         lng: v.longitude,
         srcLat: v.latitude,
@@ -236,7 +236,7 @@ function sync(vehicles) {
   /* ---------- REMOVE stale markers ---------- */
   for (const [id, s] of registry) {
     if (!incomingIds.has(id)) {
-      safeRemove(s.marker)
+      s.marker.remove()
       registry.delete(id)
     }
   }
@@ -250,7 +250,6 @@ function sync(vehicles) {
 /* ------------------------------------------------------------------ */
 function init() {
   if (!map?.value) return
-  layerGroup = L.layerGroup().addTo(map.value)
   bindMapEvents(map.value)
   if (props.vehicles.length) sync(props.vehicles)
 }
@@ -271,15 +270,11 @@ onMounted(() => {
 onBeforeUnmount(() => {
   cancelAnim()
   if (map?.value) unbindMapEvents(map.value)
-  // Clear all markers safely
+  // Clear all markers
   for (const s of registry.values()) {
-    safeRemove(s.marker)
+    s.marker.remove()
   }
   registry.clear()
-  if (layerGroup && map?.value) {
-    map.value.removeLayer(layerGroup)
-  }
-  layerGroup = null
 })
 
 watch(
