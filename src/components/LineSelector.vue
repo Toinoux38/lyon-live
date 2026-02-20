@@ -338,6 +338,17 @@ function onDragEnd(e) {
   will-change: transform;
   overscroll-behavior: contain;
 }
+/* White extension below the sheet to cover any gaps (safe area, keyboard transitions) */
+.ls-sheet::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 200px;
+  background: #fff;
+  pointer-events: none;
+}
 .ls-sheet--open { transform: translateY(0); }
 /* When keyboard is open, limit height to visual viewport so search bar stays visible */
 .ls-sheet--kb.ls-sheet--open {
