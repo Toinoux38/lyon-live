@@ -37,15 +37,21 @@ const search      = ref('')
 const searchEl    = ref(null)
 const sheetEl     = ref(null)
 const kbOffset    = ref(0)
+const vvHeight    = ref(window.innerHeight)
 
 let dragStartY    = 0
 let dragStartOpen = false
 let isDragging    = false
 
 function onViewportResize() {
-  if (!window.visualViewport) return
-  const gap = window.innerHeight - window.visualViewport.height - window.visualViewport.offsetTop
-  kbOffset.value = Math.max(0, Math.round(gap))
+  if (window.visualViewport) {
+    const gap = window.innerHeight - window.visualViewport.height - window.visualViewport.offsetTop
+    kbOffset.value = Math.max(0, Math.round(gap))
+    vvHeight.value = Math.round(window.visualViewport.height)
+  } else {
+    kbOffset.value = 0
+    vvHeight.value = window.innerHeight
+  }
 }
 
 function checkDesktop() {
@@ -55,6 +61,7 @@ function checkDesktop() {
 
 onMounted(() => {
   checkDesktop()
+  onViewportResize() // Initialize vvHeight
   window.addEventListener('resize', checkDesktop)
   window.visualViewport?.addEventListener('resize', onViewportResize)
   window.visualViewport?.addEventListener('scroll', onViewportResize)
@@ -160,8 +167,8 @@ function onDragEnd(e) {
   <div
     ref="sheetEl"
     class="ls-sheet"
-    :class="{ 'ls-sheet--open': isOpen }"
-    :style="{ '--kb': kbOffset + 'px' }"
+    :class="{ 'ls-sheet--open': isOpen, 'ls-sheet--kb': kbOffset > 0 }"
+    :style="{ '--kb': kbOffset + 'px', '--vvh': vvHeight + 'px' }"
     role="dialog"
     aria-label="Sélecteur de lignes de bus"
     @touchstart.passive="onDragStart"
@@ -326,12 +333,16 @@ function onDragEnd(e) {
   display: flex;
   flex-direction: column;
   max-height: 86dvh;
-  transform: translateY(calc(100% - 96px));
-  transition: transform 0.32s cubic-bezier(0.32,0.72,0,1), bottom 0.18s ease;
+  transform: translateY(calc(100% - 140px));
+  transition: transform 0.32s cubic-bezier(0.32,0.72,0,1), bottom 0.18s ease, max-height 0.18s ease;
   will-change: transform;
   overscroll-behavior: contain;
 }
 .ls-sheet--open { transform: translateY(0); }
+/* When keyboard is open, limit height to visual viewport so search bar stays visible */
+.ls-sheet--kb.ls-sheet--open {
+  max-height: calc(var(--vvh, 86dvh) - 8px);
+}
 
 .ls-handle {
   flex-shrink: 0;
