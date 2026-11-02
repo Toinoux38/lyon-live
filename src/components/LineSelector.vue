@@ -1,35 +1,61 @@
 ﻿<script setup>
 /**
- * LineSelector  bottom sheet for bus line selection.
+ * LineSelector – bottom sheet (mobile) / sidebar (desktop) for picking lines.
  *
  * Uses window.visualViewport to track the REAL available space when the
  * virtual keyboard pushes things around. This is the only reliable technique
  * on modern mobile browsers (iOS Safari >= 13, Chrome for Android).
  *
  * States:
- *  - resting   : compact bar, ~96px, shows search pill + recent/selected badges
- *  - open      : sheet expanded, anchored ABOVE the keyboard via visualViewport
+ *  - resting : compact bar, shows search pill + selected/recent badges
+ *  - open    : sheet expanded, anchored ABOVE the keyboard via visualViewport
  */
 
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, reactive, watch } from 'vue'
 import { useBusStore } from '@/store/busStore'
-import { ArrowRight, ArrowLeft, ArrowRightLeft } from 'lucide-vue-next'
+import { ArrowRight, ArrowLeft, ArrowRightLeft, TramFront, Bus, Layers } from 'lucide-vue-next'
+import { getLineGroupInfo, groupLines } from '@/utils/lineGroup'
+import { parseRoute } from '@/utils/routeGeometry'
+import { slotColors } from '@/utils/slotColors'
+import LineBadge from '@/components/LineBadge.vue'
 
 const store = useBusStore()
+const emit = defineEmits(['sheet-open-change'])
 
 // ---- direction helpers ------------------------------------------------
 const DIR_OPTS = [
-  { value: 'both',    icon: ArrowRightLeft, title: 'Aller/Retour (les deux sens)' },
-  { value: 'outward', icon: ArrowRight,     title: 'Aller (sens aller)' },
-  { value: 'return',  icon: ArrowLeft,      title: 'Retour (sens retour)' },
+  { value: 'both',    icon: ArrowRightLeft, title: 'Both directions' },
+  { value: 'outward', icon: ArrowRight,     title: 'Outward only' },
+  { value: 'return',  icon: ArrowLeft,      title: 'Return only' },
 ]
 function directionOf(lineId) { return store.lineDirectionMap[lineId] || 'both' }
 function setDirection(lineId, dir) { store.setLineDirection(lineId, dir) }
 function dirIcon(val) {
-  const opt = DIR_OPTS.find(o => o.value === val)
-  return opt?.icon || ArrowRightLeft
+  return DIR_OPTS.find((o) => o.value === val)?.icon || ArrowRightLeft
+}
+/** Human label for the active direction, using the API headsigns when loaded. */
+function directionLabel(lineId) {
+  const dir = directionOf(lineId)
+  const route = store.lineRoutes.get(lineId)
+  if (!route) return dir === 'both' ? 'Both directions' : 'Loading…'
+  const parsed = parseRoute(route)
+  if (dir === 'both') {
+    const a = parsed.outward?.headsign, b = parsed.return?.headsign
+    return a && b ? `${b} ⇄ ${a}` : 'Both directions'
+  }
+  const headsign = parsed[dir]?.headsign
+  return headsign ? `→ ${headsign}` : (dir === 'outward' ? 'Outward' : 'Return')
+}
+function dirTitle(lineId, opt) {
+  if (opt.value === 'both') return opt.title
+  const headsign = parseRoute(store.lineRoutes.get(lineId))[opt.value]?.headsign
+  return headsign ? `Towards ${headsign}` : opt.title
+}
+function mapColor(lineId) {
+  return slotColors(store.lineSlots[lineId]).outward
 }
 
+// ---- sheet state ------------------------------------------------------
 const isDesktop   = ref(false)
 const isOpen      = ref(false)
 const isSearching = ref(false)
@@ -55,13 +81,19 @@ function onViewportResize() {
 }
 
 function checkDesktop() {
+  const wasDesktop = isDesktop.value
   isDesktop.value = window.innerWidth >= 769
   if (isDesktop.value) isOpen.value = true
+  else if (wasDesktop) isOpen.value = false // shrinking to mobile: start collapsed
 }
+
+watch([isOpen, isDesktop], ([open, desktop]) => {
+  emit('sheet-open-change', !desktop && open)
+}, { immediate: true })
 
 onMounted(() => {
   checkDesktop()
-  onViewportResize() // Initialize vvHeight
+  onViewportResize()
   window.addEventListener('resize', checkDesktop)
   window.visualViewport?.addEventListener('resize', onViewportResize)
   window.visualViewport?.addEventListener('scroll', onViewportResize)
@@ -75,34 +107,54 @@ onBeforeUnmount(() => {
 
 function openSheet()  { if (!isDesktop.value) isOpen.value = true }
 function closeSheet() {
-  if (isDesktop.value) return  // never close on desktop
+  if (isDesktop.value) return // never close on desktop
   isOpen.value      = false
   isSearching.value = false
   search.value      = ''
   searchEl.value?.blur()
 }
 
-function onSearchFocus() { isSearching.value = true;  openSheet() }
+function onSearchFocus() { isSearching.value = true; openSheet() }
 function onSearchBlur()  { setTimeout(() => { isSearching.value = false }, 200) }
 function clearSearch()   { search.value = ''; searchEl.value?.focus() }
 
+// ---- filtering --------------------------------------------------------
+const MODE_OPTS = [
+  { value: 'all',  label: 'All',  icon: Layers },
+  { value: 'tram', label: 'Tram', icon: TramFront },
+  { value: 'bus',  label: 'Bus',  icon: Bus },
+]
+const modeFilter = ref('all')
+
+/** Lowercase + strip accents so "venissieux" finds "Vénissieux". */
+function norm(s) {
+  return (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+}
+
+const searchIndex = computed(() =>
+  store.transitLines.map((line) => {
+    const gi = getLineGroupInfo(line)
+    return { line, isTram: gi.isTram, haystack: norm(`${line.sName} ${gi.prefix}${gi.number} ${line.lName}`) }
+  }),
+)
+
 const filteredLines = computed(() => {
-  const q = search.value.trim().toLowerCase()
-  if (!q) return store.busLines
-  return store.busLines.filter(
-    l => (l.sName?.toLowerCase().includes(q)) || (l.lName?.toLowerCase().includes(q))
-  )
+  const q = norm(search.value.trim())
+  const mode = modeFilter.value
+  return searchIndex.value
+    .filter((e) => (mode === 'all' || (mode === 'tram') === e.isTram) && (!q || e.haystack.includes(q)))
+    .map((e) => e.line)
 })
 
 const selectedLines = computed(() =>
-  store.selectedIds.map(id => store.lineMap[id]).filter(Boolean)
+  store.selectedIds.map((id) => store.lineMap[id]).filter(Boolean),
 )
 
 const recentLines = computed(() => {
   const maxShow = Math.max(0, 4 - selectedLines.value.length)
   return store.recentLineIds
-    .filter(id => !store.selectedLineIds.has(id))
-    .map(id => store.lineMap[id])
+    .filter((id) => !store.selectedLineIds.has(id))
+    .map((id) => store.lineMap[id])
     .filter(Boolean)
     .slice(0, maxShow)
 })
@@ -115,12 +167,15 @@ function parseDestinations(lName) {
     : [lName, '']
 }
 
-/** filteredLines enriched with pre-parsed destinations to avoid calling parseDestinations twice per row in the template */
-const filteredLinesWithDest = computed(() =>
-  filteredLines.value.map((line) => {
-    const [from, to] = parseDestinations(line.lName)
-    return { ...line, _from: from, _to: to }
-  })
+/** filteredLines grouped by type, each line enriched with parsed destinations */
+const filteredGroupedLines = computed(() =>
+  groupLines(
+    filteredLines.value.map((line) => {
+      const [from, to] = parseDestinations(line.lName)
+      return { line, id: line.id, _from: from, _to: to }
+    }),
+    (entry) => entry.line,
+  ),
 )
 
 function handleToggle(lineId) {
@@ -128,6 +183,7 @@ function handleToggle(lineId) {
   store.toggleLine(lineId)
 }
 
+// ---- drag to open/close (mobile) --------------------------------------
 function onDragStart(e) {
   const t = e.touches?.[0] ?? e
   dragStartY    = t.clientY
@@ -157,6 +213,29 @@ function onDragEnd(e) {
   if (dy < -40 && !dragStartOpen) openSheet()
   if (dy >  60 &&  dragStartOpen) closeSheet()
 }
+
+// ---- group collapse ---------------------------------------------------
+// Small groups (trams, trambus) are always fully shown; big ones show a
+// preview until expanded. While searching, everything that matches is shown.
+const GROUP_PREVIEW = 6
+const COLLAPSE_THRESHOLD = 10
+const expandedGroups = reactive(new Set())
+function isCollapsible(group) {
+  return !search.value.trim()
+    && group.lines.length > COLLAPSE_THRESHOLD
+    && !expandedGroups.has(group.key)
+}
+function canToggleGroup(group) {
+  return !search.value.trim() && group.lines.length > COLLAPSE_THRESHOLD
+}
+function toggleGroup(group) {
+  if (!canToggleGroup(group)) return
+  if (expandedGroups.has(group.key)) expandedGroups.delete(group.key)
+  else expandedGroups.add(group.key)
+}
+function visibleLines(group) {
+  return isCollapsible(group) ? group.lines.slice(0, GROUP_PREVIEW) : group.lines
+}
 </script>
 
 <template>
@@ -170,7 +249,7 @@ function onDragEnd(e) {
     :class="{ 'ls-sheet--open': isOpen, 'ls-sheet--kb': kbOffset > 0 }"
     :style="{ '--kb': kbOffset + 'px', '--vvh': vvHeight + 'px' }"
     role="dialog"
-    aria-label="Sélecteur de lignes de bus"
+    aria-label="Line picker"
     @touchstart.passive="onDragStart"
     @touchmove.passive="onDragMove"
     @touchend.passive="onDragEnd"
@@ -190,8 +269,8 @@ function onDragEnd(e) {
           v-model="search"
           type="search"
           class="ls-search-box__input"
-          placeholder="Search a line"
-          aria-label="Search a bus line"
+          placeholder="Search a line or destination"
+          aria-label="Search a bus or tram line"
           enterkeyhint="search"
           autocomplete="off"
           autocorrect="off"
@@ -199,104 +278,143 @@ function onDragEnd(e) {
           @focus="onSearchFocus"
           @blur="onSearchBlur"
         />
-        <button v-if="search" class="ls-search-box__clear" @click.stop="clearSearch" tabindex="-1">
+        <button v-if="search" class="ls-search-box__clear" aria-label="Clear search" @click.stop="clearSearch" tabindex="-1">
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
             <path d="M1 1l12 12M13 1L1 13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
           </svg>
         </button>
       </div>
-      <button v-if="isOpen" class="ls-cancel-btn" @click="closeSheet">Cancel</button>
+      <button v-if="isOpen" class="ls-cancel-btn" @click="closeSheet">Done</button>
     </div>
 
     <!-- Resting: badges -->
     <div v-if="!isOpen" class="ls-badges">
-      <template v-if="selectedLines.length === 0 && recentLines.length === 0">
-        <span class="ls-badges__hint">Tap to pick a bus line</span>
-      </template>
+      <span v-if="selectedLines.length === 0 && recentLines.length === 0" class="ls-badges__hint">
+        Tap to pick a bus or tram line
+      </span>
       <button
         v-for="line in selectedLines" :key="'s' + line.id"
         class="ls-badge ls-badge--selected"
-        :style="{ '--c': '#' + line.color, '--tc': '#' + line.textColor }"
+        :style="{ '--slot': mapColor(line.id) }"
+        :aria-label="'Remove line ' + line.sName"
         @click.stop="handleToggle(line.id)"
       >
-        <span>{{ line.sName }}</span>
-        <component :is="dirIcon(directionOf(line.id))" class="ls-badge__dir" />
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-          <path d="M2 6.5l2.5 2.5L10 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
+        <LineBadge :line="line">
+          <component :is="dirIcon(directionOf(line.id))" class="ls-badge__dir" />
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+            <path d="M2 6.5l2.5 2.5L10 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </LineBadge>
       </button>
       <button
         v-for="line in recentLines" :key="'r' + line.id"
         class="ls-badge ls-badge--recent"
-        :style="{ '--c': '#' + line.color, '--tc': '#' + line.textColor }"
+        :aria-label="'Show line ' + line.sName"
         @click.stop="handleToggle(line.id)"
-      >{{ line.sName }}</button>
+      >
+        <LineBadge :line="line" />
+      </button>
       <span v-if="store.isPolling && store.vehicleCount > 0" class="ls-live-pill">
         <span class="ls-live-pill__dot" />{{ store.vehicleCount }}
       </span>
     </div>
 
-    <!-- Open: actions -->
+    <!-- Open: mode filter + actions -->
     <div v-if="isOpen" class="ls-actions">
-      <button class="ls-actions__select" :disabled="store.maxReached" @click="store.selectAll()">
-        Select top {{ store.maxLines }}
-      </button>
+      <div class="ls-mode" role="radiogroup" aria-label="Filter by mode">
+        <button
+          v-for="opt in MODE_OPTS" :key="opt.value"
+          class="ls-mode__btn"
+          :class="{ 'ls-mode__btn--active': modeFilter === opt.value }"
+          role="radio"
+          :aria-checked="modeFilter === opt.value"
+          @click="modeFilter = opt.value"
+        >
+          <component :is="opt.icon" class="ls-mode__icon" />{{ opt.label }}
+        </button>
+      </div>
       <button v-if="store.activeLineCount > 0" class="ls-actions__clear" @click="store.clearSelection()">
         Clear
       </button>
-      <span v-if="store.isPolling && store.vehicleCount > 0" class="ls-live-pill ls-live-pill--sm">
-        <span class="ls-live-pill__dot" />{{ store.vehicleCount }} live
-      </span>
     </div>
 
-    <!-- Open: direction panel (one toggle row per selected line) -->
+    <!-- Open: direction panel (one row per selected line) -->
     <div v-if="isOpen && selectedLines.length > 0" class="ls-dir-panel">
       <div v-for="line in selectedLines" :key="'dp' + line.id" class="ls-dir-row">
-        <span
-          class="ls-dir-row__badge"
-          :style="{ background: '#' + line.color, color: '#' + line.textColor }"
-        >{{ line.sName }}</span>
-        <div class="ls-dir-toggle" role="group" :aria-label="'Sens ligne ' + line.sName">
+        <span class="ls-dir-row__swatch" :style="{ background: mapColor(line.id) }" title="Color on the map" />
+        <LineBadge :line="line" size="sm" />
+        <span class="ls-dir-row__label">{{ directionLabel(line.id) }}</span>
+        <div class="ls-dir-toggle" role="group" :aria-label="'Direction for line ' + line.sName">
           <button
             v-for="opt in DIR_OPTS" :key="opt.value"
             class="ls-dir-btn"
             :class="{ 'ls-dir-btn--active': directionOf(line.id) === opt.value }"
-            :title="opt.title"
+            :title="dirTitle(line.id, opt)"
+            :aria-label="dirTitle(line.id, opt)"
+            :aria-pressed="directionOf(line.id) === opt.value"
             @click.stop="setDirection(line.id, opt.value)"
           >
             <component :is="opt.icon" class="ls-dir-btn__icon" />
           </button>
         </div>
       </div>
+      <p v-if="store.maxReached" class="ls-dir-panel__hint">
+        Up to {{ store.maxLines }} lines at once — remove one to add another.
+      </p>
     </div>
 
     <!-- Open: list -->
     <div v-if="isOpen" class="ls-list-wrap">
-      <div v-if="store.isLoadingLines" class="ls-loading">Loading lines</div>
+      <div v-if="store.isLoadingLines" class="ls-loading">Loading lines…</div>
       <div v-else class="ls-list">
-        <button
-          v-for="line in filteredLinesWithDest" :key="line.id"
-          class="ls-row"
-          :class="{
-            'ls-row--on':  store.selectedLineIds.has(line.id),
-            'ls-row--off': store.maxReached && !store.selectedLineIds.has(line.id),
-          }"
-          @click="handleToggle(line.id)"
-        >
-          <span class="ls-row__badge" :style="{ background: '#' + line.color, color: '#' + line.textColor }">
-            {{ line.sName }}
-          </span>
-          <span class="ls-row__name">
-            <span class="ls-row__from">{{ line._from }}</span>
-            <span class="ls-row__arrow"></span>
-            <span class="ls-row__to">{{ line._to }}</span>
-          </span>
-          <svg v-if="store.selectedLineIds.has(line.id)" class="ls-row__check" width="18" height="18" viewBox="0 0 18 18" fill="none">
-            <path d="M3.5 9.5l4 4L14.5 5" stroke="#DC2626" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </button>
-        <p v-if="filteredLines.length === 0 && search" class="ls-empty">
-          No results for "{{ search }}"
+        <template v-for="group in filteredGroupedLines" :key="group.key">
+          <div
+            class="ls-group-header"
+            :class="{ 'ls-group-header--toggle': canToggleGroup(group) }"
+            @click="toggleGroup(group)"
+          >
+            <span>{{ group.label }} <span class="ls-group-count">{{ group.lines.length }}</span></span>
+            <svg
+              v-if="canToggleGroup(group)"
+              class="ls-group-chevron"
+              :class="{ 'ls-group-chevron--open': !isCollapsible(group) }"
+              width="12" height="12" viewBox="0 0 12 12" fill="none"
+            >
+              <path d="M2 4l4 4 4-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <button
+            v-for="entry in visibleLines(group)" :key="entry.id"
+            class="ls-row"
+            :class="{
+              'ls-row--on':  store.selectedLineIds.has(entry.id),
+              'ls-row--off': store.maxReached && !store.selectedLineIds.has(entry.id),
+            }"
+            :aria-pressed="store.selectedLineIds.has(entry.id)"
+            @click="handleToggle(entry.id)"
+          >
+            <LineBadge :line="entry.line" />
+            <span class="ls-row__name">
+              <span class="ls-row__from">{{ entry._from }}</span>
+              <span v-if="entry._to" class="ls-row__arrow">→</span>
+              <span class="ls-row__to">{{ entry._to }}</span>
+            </span>
+            <svg v-if="store.selectedLineIds.has(entry.id)" class="ls-row__check" width="18" height="18" viewBox="0 0 18 18" fill="none">
+              <path d="M3.5 9.5l4 4L14.5 5" :stroke="mapColor(entry.id)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <button
+            v-if="isCollapsible(group)"
+            class="ls-group-more"
+            @click.stop="toggleGroup(group)"
+          >
+            Show all {{ group.lines.length }} lines
+          </button>
+        </template>
+        <p v-if="filteredLines.length === 0 && !store.isLoadingLines" class="ls-empty">
+          <template v-if="search">No results for "{{ search }}"</template>
+          <template v-else-if="store.error">{{ store.error }}</template>
+          <template v-else>No lines</template>
         </p>
       </div>
     </div>
@@ -316,9 +434,9 @@ function onDragEnd(e) {
 .fade-enter-from,  .fade-leave-to     { opacity: 0; }
 
 /*
- * KEY: transform: translateY(calc(100% - 96px)) hides all but the top 96px
+ * KEY: transform: translateY(calc(100% - 140px)) hides all but the top 140px
  * (handle + search + badges). The sheet is always full-height in the DOM,
- * so the list is already rendered and ready  no layout flash on open.
+ * so the list is already rendered and ready — no layout flash on open.
  * bottom: var(--kb) floats the sheet above the virtual keyboard.
  */
 .ls-sheet {
@@ -408,11 +526,12 @@ function onDragEnd(e) {
 .ls-search-box__clear:hover { background: #8e8e93; }
 .ls-cancel-btn {
   flex-shrink: 0; border: none; background: none;
-  color: #007aff; font-size: 15px; font-weight: 500;
+  color: #007aff; font-size: 15px; font-weight: 600;
   padding: 0 4px; cursor: pointer; font-family: inherit;
   white-space: nowrap; -webkit-tap-highlight-color: transparent;
 }
 
+/* ---- Resting badges -------------------------------------------- */
 .ls-badges {
   flex-shrink: 0;
   display: flex; align-items: center; flex-wrap: wrap;
@@ -420,41 +539,35 @@ function onDragEnd(e) {
 }
 .ls-badges__hint { font-size: 13px; color: #8e8e93; }
 .ls-badge {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 6px 13px; border: none; border-radius: 99px;
-  font-size: 13px; font-weight: 700; cursor: pointer;
-  font-family: inherit; -webkit-tap-highlight-color: transparent;
+  display: inline-flex;
+  padding: 0;
+  border: none;
+  border-radius: 99px;
+  background: none;
+  cursor: pointer;
+  font-family: inherit;
+  -webkit-tap-highlight-color: transparent;
   transition: opacity 0.15s, transform 0.1s;
 }
 .ls-badge:active { transform: scale(0.93); }
+/* Selected: ring in the line's map color */
 .ls-badge--selected {
-  background: var(--c); color: var(--tc);
-  box-shadow: 0 0 0 2.5px rgba(0,0,0,0.12);
+  box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--slot, rgba(0,0,0,0.18));
 }
+.ls-badge--recent { opacity: 0.6; }
+.ls-badge--recent:hover { opacity: 1; }
 .ls-badge__dir {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 14px;
+  width: 13px;
+  height: 13px;
   flex-shrink: 0;
-}
-.ls-badge__dir svg {
-  width: 100%;
-  height: 100%;
   stroke-width: 2.5;
-}
-.ls-badge--recent {
-  background: color-mix(in srgb, var(--c) 14%, #f2f2f7);
-  color: color-mix(in srgb, var(--c) 75%, #1c1c1e);
-  border: 1.5px solid color-mix(in srgb, var(--c) 28%, transparent);
 }
 .ls-live-pill {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 5px 10px; background: #f2f2f7; border-radius: 99px;
   font-size: 12px; font-weight: 600; color: #3a3a3c; margin-left: auto;
+  white-space: nowrap;
 }
-.ls-live-pill--sm { margin-left: auto; }
 .ls-live-pill__dot {
   width: 7px; height: 7px; border-radius: 50%; background: #34c759;
   animation: dot-pulse 2s ease infinite;
@@ -463,19 +576,35 @@ function onDragEnd(e) {
   0%, 100% { opacity: 1; } 50% { opacity: 0.4; }
 }
 
+/* ---- Actions row (mode filter) ---------------------------------- */
 .ls-actions {
   flex-shrink: 0;
   display: flex; align-items: center; gap: 8px;
   padding: 0 14px 10px;
   border-bottom: 1px solid #f2f2f7;
 }
-.ls-actions__select {
-  padding: 7px 14px; border: 1.5px solid #e5e7eb; border-radius: 10px;
-  background: #fff; color: #3a3a3c; font-size: 13px; font-weight: 600;
-  cursor: pointer; font-family: inherit; transition: background 0.15s;
+.ls-mode {
+  display: flex;
+  background: #f2f2f7;
+  border-radius: 10px;
+  padding: 3px;
+  gap: 2px;
 }
-.ls-actions__select:hover { background: #f2f2f7; }
-.ls-actions__select:disabled { opacity: 0.35; cursor: default; }
+.ls-mode__btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 30px; padding: 0 11px;
+  border: none; border-radius: 8px; background: none;
+  color: #6b7280; font-size: 13px; font-weight: 600;
+  font-family: inherit; cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+.ls-mode__btn:hover { color: #1c1c1e; }
+.ls-mode__btn--active {
+  background: #fff; color: #1c1c1e;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+}
+.ls-mode__icon { width: 15px; height: 15px; stroke-width: 2.2; }
 .ls-actions__clear {
   padding: 7px 14px; border: none; border-radius: 10px;
   background: #fef2f2; color: #dc2626; font-size: 13px; font-weight: 600;
@@ -483,6 +612,7 @@ function onDragEnd(e) {
 }
 .ls-actions__clear:hover { background: #fee2e2; }
 
+/* ---- List ------------------------------------------------------- */
 .ls-list-wrap {
   flex: 1; overflow-y: auto; overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
@@ -492,26 +622,65 @@ function onDragEnd(e) {
 .ls-loading, .ls-empty {
   padding: 32px 16px; text-align: center; font-size: 14px; color: #8e8e93;
 }
+.ls-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #8e8e93;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  position: sticky;
+  top: 0;
+  background: #fff;
+  z-index: 1;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.ls-group-header--toggle { cursor: pointer; }
+.ls-group-count {
+  margin-left: 4px;
+  color: #c7c7cc;
+  font-weight: 600;
+}
+.ls-group-chevron {
+  color: #c7c7cc;
+  transition: transform 0.22s ease;
+  flex-shrink: 0;
+}
+.ls-group-chevron--open { transform: rotate(180deg); }
+.ls-group-more {
+  display: block;
+  width: 100%;
+  padding: 8px 16px 12px 16px;
+  border: none;
+  background: none;
+  text-align: left;
+  color: #007aff;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.ls-group-more:hover { text-decoration: underline; }
 
 .ls-row {
   display: flex; align-items: center; gap: 12px;
-  width: 100%; padding: 11px 16px;
+  width: 100%; padding: 9px 16px;
   border: none; background: none; cursor: pointer;
   text-align: left; font-family: inherit;
   -webkit-tap-highlight-color: transparent;
   transition: background 0.1s;
 }
+.ls-row:hover   { background: #fafafa; }
 .ls-row:active  { background: #f2f2f7; }
 .ls-row--on     { background: #fff1f2; }
-.ls-row--on:active { background: #fee2e2; }
+.ls-row--on:hover { background: #ffe4e6; }
 .ls-row--off    { opacity: 0.32; pointer-events: none; }
 
-.ls-row__badge {
-  flex-shrink: 0; display: inline-flex; align-items: center;
-  justify-content: center; min-width: 48px; height: 32px;
-  padding: 0 8px; border-radius: 7px; font-size: 13px;
-  font-weight: 800; letter-spacing: 0.02em; white-space: nowrap;
-}
 .ls-row__name {
   flex: 1; min-width: 0; display: flex; align-items: center;
   gap: 5px; font-size: 13px; color: #3a3a3c;
@@ -536,26 +705,34 @@ function onDragEnd(e) {
   padding: 8px 14px 10px;
   border-bottom: 1px solid #f2f2f7;
 }
+.ls-dir-panel__hint {
+  font-size: 12px;
+  color: #8e8e93;
+  padding-top: 2px;
+}
 .ls-dir-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
-.ls-dir-row__badge {
+.ls-dir-row__swatch {
   flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 38px;
-  height: 26px;
-  padding: 0 7px;
-  border-radius: 6px;
+  width: 4px;
+  height: 24px;
+  border-radius: 99px;
+}
+.ls-dir-row__label {
+  flex: 1;
+  min-width: 0;
   font-size: 12px;
-  font-weight: 800;
-  letter-spacing: 0.02em;
+  font-weight: 500;
+  color: #6b7280;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .ls-dir-toggle {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   background: #f2f2f7;
@@ -603,7 +780,10 @@ function onDragEnd(e) {
     bottom: 16px !important;
     border-radius: 16px;
     box-shadow: 0 4px 24px rgba(0,0,0,0.12);
+    overflow: hidden;
   }
+  .ls-sheet::after { display: none; }
+  .ls-search-row { padding-top: 14px; }
   .ls-handle    { display: none; }
   .ls-cancel-btn { display: none; }
 }

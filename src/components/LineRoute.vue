@@ -1,307 +1,254 @@
 <script setup>
 /**
- * LineRoute - Draws a bus line's route on the MapLibre GL map.
+ * LineRoute – draws one selected line on the MapLibre map (renderless).
  *
- * Features:
- *  - Decodes Google Encoded Polylines from the TCL API
- *  - Uses MapLibre line layers for route visualization
- *  - Displays terminus pills and stop markers using DOM markers
+ *  - Route: casing + colored line, inserted *below* the basemap labels.
+ *    When both directions are shown each one is offset to its right-hand side
+ *    so outward and return run side by side instead of hiding each other.
+ *  - Stops: GPU circle layer (not DOM markers) + names from zoom 14.5.
+ *  - Terminus: one DOM pill per displayed direction, showing the headsign.
  */
 
 import { watch, inject, onMounted, onBeforeUnmount } from 'vue'
 import maplibregl from 'maplibre-gl'
+import { parseRoute, escapeHtml } from '@/utils/routeGeometry'
 
 const props = defineProps({
-  routeData: { type: Object, required: true },
+  routeData:    { type: Object, required: true },
+  lineId:       { type: String, required: true },
   outwardColor: { type: String, default: '#DC2626' },
   returnColor:  { type: String, default: '#F87171' },
-  lineId:       { type: String, required: true },
   /** Which directions to render: 'both' | 'outward' | 'return' */
   direction:    { type: String, default: 'both' },
+  /** Trams get a slightly heavier line */
+  isTram:       { type: Boolean, default: false },
 })
 
 const map = inject('maplibreMap')
 
-// Unique source/layer IDs for this component instance
-const sourceId = `route-${props.lineId}`
-let layerIds = []
-let markers = []
+const ns = `route-${props.lineId}`
+const LINE_SRC = `${ns}-lines`
+const STOP_SRC = `${ns}-stops`
+const CASING   = `${ns}-casing`
+const LINE     = `${ns}-line`
+const STOPS    = `${ns}-stops`
+const LABELS   = `${ns}-labels`
+
+let terminusMarkers = []
+let stopPopup = null
+let mounted = false
+
+const hoverCapable = window.matchMedia?.('(hover: hover)').matches ?? true
 
 /* ------------------------------------------------------------------ */
-/*  Polyline decoder                                                    */
+/*  DOM helpers                                                        */
 /* ------------------------------------------------------------------ */
-function decodePolyline(encoded) {
-  const points = []
-  let index = 0, lat = 0, lng = 0
-  while (index < encoded.length) {
-    let shift = 0, result = 0, byte
-    do { byte = encoded.charCodeAt(index++) - 63; result |= (byte & 0x1f) << shift; shift += 5 } while (byte >= 0x20)
-    lat += (result & 1) ? ~(result >> 1) : (result >> 1)
-    shift = 0; result = 0
-    do { byte = encoded.charCodeAt(index++) - 63; result |= (byte & 0x1f) << shift; shift += 5 } while (byte >= 0x20)
-    lng += (result & 1) ? ~(result >> 1) : (result >> 1)
-    points.push([lng / 1e5, lat / 1e5]) // GeoJSON: [lng, lat]
-  }
-  return points
-}
+const FLAG_SVG = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1"/><line x1="4" y1="22" x2="4" y2="15"/></svg>`
 
-/* ------------------------------------------------------------------ */
-/*  Get Lucide-style flag SVG for one-way indicator                    */
-/* ------------------------------------------------------------------ */
-function getFlagSvg() {
-  return `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:5px;display:inline-block;">
-    <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1" />
-    <line x1="4" y1="22" x2="4" y2="15" />
-  </svg>`
-}
-
-/* ------------------------------------------------------------------ */
-/*  Create terminus pill DOM element                                    */
-/* ------------------------------------------------------------------ */
-function createTerminusPill(name, color, isOneWay) {
+function createTerminusPill(name, color) {
   const el = document.createElement('div')
   el.className = 'terminus-pill'
-  el.innerHTML = `<div style="
-    background:${color};
-    color:#ffffff;
-    border-radius:99px;
-    padding:4px 11px;
-    font-size:11px;
-    font-weight:700;
-    white-space:nowrap;
-    box-shadow:0 2px 8px rgba(0,0,0,0.28);
-    font-family:'Figtree',sans-serif;
-    border:1.5px solid rgba(255,255,255,0.35);
-    pointer-events:none;
-    display:flex;
-    align-items:center;
-    transform:translate(-50%,-100%);
-  ">${name}${isOneWay ? getFlagSvg() : ''}</div>`
+  el.style.setProperty('--pill-color', color)
+  el.innerHTML = `${FLAG_SVG}<span>${escapeHtml(name)}</span>`
   return el
 }
 
-/* ------------------------------------------------------------------ */
-/*  Create stop marker DOM element                                      */
-/* ------------------------------------------------------------------ */
-function createStopMarker(color) {
-  const el = document.createElement('div')
-  el.style.cssText = `
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: #ffffff;
-    border: 2px solid ${color};
-    cursor: pointer;
-  `
-  return el
+/** First symbol layer of the basemap: routes go below it, under the labels. */
+function firstBasemapSymbolId(m) {
+  return m.getStyle().layers.find((l) => l.type === 'symbol' && !l.id.startsWith('route-'))?.id
 }
 
 /* ------------------------------------------------------------------ */
-/*  Clear all layers and markers                                        */
+/*  Stop interactions                                                  */
 /* ------------------------------------------------------------------ */
-function clearRoute() {
-  if (!map?.value) return
+function showStopPopup(e) {
+  const f = e.features?.[0]
+  if (!f) return
+  stopPopup ??= new maplibregl.Popup({
+    closeButton: false,
+    offset: 8,
+    className: 'stop-popup',
+    focusAfterOpen: false,
+  })
+  stopPopup
+    .setLngLat(f.geometry.coordinates)
+    .setHTML(`<span class="stop-popup__name">${escapeHtml(f.properties.name)}</span>`)
+    .addTo(map.value)
+}
+function hideStopPopup() { stopPopup?.remove() }
+function onStopEnter(e) { map.value.getCanvas().style.cursor = 'pointer'; if (hoverCapable) showStopPopup(e) }
+function onStopLeave() { map.value.getCanvas().style.cursor = ''; if (hoverCapable) hideStopPopup() }
+function onStopClick(e) { showStopPopup(e) }
 
-  // Remove layers first
-  for (const id of layerIds) {
-    if (map.value.getLayer(id)) {
-      map.value.removeLayer(id)
-    }
-  }
-  layerIds = []
-
-  // Remove source
-  if (map.value.getSource(sourceId)) {
-    map.value.removeSource(sourceId)
-  }
-
-  // Remove markers
-  for (const m of markers) {
-    m.remove()
-  }
-  markers = []
+function bindStopEvents(m) {
+  m.on('mouseenter', STOPS, onStopEnter)
+  m.on('mouseleave', STOPS, onStopLeave)
+  m.on('click', STOPS, onStopClick)
+}
+function unbindStopEvents(m) {
+  m.off('mouseenter', STOPS, onStopEnter)
+  m.off('mouseleave', STOPS, onStopLeave)
+  m.off('click', STOPS, onStopClick)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Draw route                                                          */
+/*  Build GeoJSON                                                      */
 /* ------------------------------------------------------------------ */
-function drawRoute() {
-  if (!map?.value) return
+function buildData() {
+  const parsed = parseRoute(props.routeData)
+  const wanted = props.direction === 'both' ? ['outward', 'return'] : [props.direction]
+  const shown = wanted.filter((k) => parsed[k])
+  const sideBySide = shown.length === 2
 
-  clearRoute()
+  const lines = []
+  const stops = []
+  const termini = []
+  const seenLabels = new Set()
 
-  const data = props.routeData
-  if (!data) return
+  for (const key of shown) {
+    const dir = parsed[key]
+    const color = key === 'return' ? props.returnColor : props.outwardColor
 
-  const directions = data.directions || data || []
-  const dirArray = Array.isArray(directions) ? directions : [directions]
-
-  // Count how many directions will actually be drawn (respects the direction prop)
-  const drawnCount = dirArray.filter((_, i) => {
-    if (props.direction === 'outward' && i === 1) return false
-    if (props.direction === 'return'  && i === 0) return false
-    return true
-  }).length
-
-  // Build GeoJSON features for all routes
-  const features = []
-  let layerIndex = 0
-
-  for (let di = 0; di < dirArray.length; di++) {
-    const dir = dirArray[di]
-    const isReturn = di === 1
-
-    // Filter based on the direction prop
-    if (props.direction === 'outward' && isReturn) continue
-    if (props.direction === 'return' && !isReturn) continue
-
-    const color = isReturn ? props.returnColor : props.outwardColor
-
-    // Decode shapes
-    let segments = []
-    if (dir.shapes && typeof dir.shapes === 'string') {
-      segments = [decodePolyline(dir.shapes)]
-    } else if (Array.isArray(dir.shapes) && dir.shapes.length > 0) {
-      segments = dir.shapes
-        .filter((s) => typeof s === 'string')
-        .map((s) => decodePolyline(s))
-    }
-
-    if (segments.length === 0 && dir.geometry?.coordinates) {
-      segments = [dir.geometry.coordinates]
-    }
-
-    // Create line features
-    for (const coords of segments) {
-      if (coords.length < 2) continue
-      features.push({
+    for (const coords of dir.segments) {
+      lines.push({
         type: 'Feature',
-        properties: {
-          color,
-          dirIndex: di,
-          layerIndex: layerIndex++,
-        },
-        geometry: {
-          type: 'LineString',
-          coordinates: coords,
-        },
+        properties: { color, offset: sideBySide ? 1 : 0 },
+        geometry: { type: 'LineString', coordinates: coords },
       })
     }
 
-    // Add terminus pill at last stop
-    if (dir.stopPoints && dir.stopPoints.length > 0) {
-      const stop = dir.stopPoints[dir.stopPoints.length - 1]
-      const pos = stop.position || stop
-      const lat = pos.latitude ?? pos.lat
-      const lng = pos.longitude ?? pos.lon ?? pos.lng
-      if (lat && lng) {
-        const name = stop.name || stop.label || ''
-        const el = createTerminusPill(name, color, drawnCount === 1)
-        const marker = new maplibregl.Marker({ element: el, anchor: 'bottom' })
-          .setLngLat([lng, lat])
-          .addTo(map.value)
-        markers.push(marker)
-      }
+    for (const s of dir.stops) {
+      // One label per stop area, even though each direction has its own platform
+      const label = seenLabels.has(s.areaId) ? '' : s.name
+      seenLabels.add(s.areaId)
+      stops.push({
+        type: 'Feature',
+        properties: { color, name: s.name, label },
+        geometry: { type: 'Point', coordinates: [s.lng, s.lat] },
+      })
     }
 
-    // Add stop markers
-    if (dir.stopPoints && Array.isArray(dir.stopPoints)) {
-      for (const stop of dir.stopPoints) {
-        const pos = stop.position || stop
-        const lat = pos.latitude ?? pos.lat
-        const lng = pos.longitude ?? pos.lon ?? pos.lng
-        if (lat && lng) {
-          const el = createStopMarker(color)
-          const marker = new maplibregl.Marker({ element: el })
-            .setLngLat([lng, lat])
-            .addTo(map.value)
-
-          // Add popup on click
-          const popup = new maplibregl.Popup({
-            closeButton: false,
-            offset: [0, -5],
-          }).setHTML(
-            `<span style="font-family:'Figtree',sans-serif;font-size:12px;font-weight:600;">${stop.name || stop.label || ''}</span>`
-          )
-
-          el.addEventListener('mouseenter', () => marker.setPopup(popup).togglePopup())
-          el.addEventListener('mouseleave', () => popup.remove())
-
-          markers.push(marker)
-        }
-      }
-    }
+    const last = dir.stops[dir.stops.length - 1]
+    if (last) termini.push({ name: dir.headsign || last.name, color, lngLat: [last.lng, last.lat] })
   }
 
-  if (features.length === 0) return
+  return {
+    lines: { type: 'FeatureCollection', features: lines },
+    stops: { type: 'FeatureCollection', features: stops },
+    termini,
+  }
+}
 
-  // Add GeoJSON source
-  map.value.addSource(sourceId, {
-    type: 'geojson',
-    data: {
-      type: 'FeatureCollection',
-      features,
+/* ------------------------------------------------------------------ */
+/*  Add / update / remove                                              */
+/* ------------------------------------------------------------------ */
+function addLayers(m) {
+  const before = firstBasemapSymbolId(m)
+  const w = props.isTram ? 1.25 : 1
+  const width = ['interpolate', ['linear'], ['zoom'], 11, 2.5 * w, 14, 4 * w, 17, 7 * w]
+  const casingWidth = ['interpolate', ['linear'], ['zoom'], 11, 5 * w, 14, 7.5 * w, 17, 12 * w]
+  // offset is a 0/1 flag: shift each direction to its right by ~half a line width
+  // (MapLibre requires `zoom` to be the top-level input, so the flag goes inside each stop)
+  const off = (px) => ['*', ['get', 'offset'], px]
+  const offset = ['interpolate', ['linear'], ['zoom'], 11, off(1.5), 14, off(2.5), 17, off(4)]
+
+  m.addLayer({
+    id: CASING, type: 'line', source: LINE_SRC,
+    layout: { 'line-join': 'round', 'line-cap': 'round' },
+    paint: { 'line-color': '#ffffff', 'line-width': casingWidth, 'line-opacity': 0.9, 'line-offset': offset },
+  }, before)
+
+  m.addLayer({
+    id: LINE, type: 'line', source: LINE_SRC,
+    layout: { 'line-join': 'round', 'line-cap': 'round' },
+    paint: { 'line-color': ['get', 'color'], 'line-width': width, 'line-offset': offset },
+  }, before)
+
+  m.addLayer({
+    id: STOPS, type: 'circle', source: STOP_SRC,
+    minzoom: 11.5,
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 11.5, 2, 14, 3.5, 17, 5.5],
+      'circle-color': '#ffffff',
+      'circle-stroke-color': ['get', 'color'],
+      'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 11.5, 1.2, 14, 2, 17, 2.5],
     },
   })
 
-  // Add white outline layer (casing)
-  const casingLayerId = `${sourceId}-casing`
-  map.value.addLayer({
-    id: casingLayerId,
-    type: 'line',
-    source: sourceId,
+  m.addLayer({
+    id: LABELS, type: 'symbol', source: STOP_SRC,
+    minzoom: 14.5,
+    filter: ['!=', ['get', 'label'], ''],
     layout: {
-      'line-join': 'round',
-      'line-cap': 'round',
+      'text-field': ['get', 'label'],
+      'text-font': ['Noto Sans Bold'],
+      'text-size': ['interpolate', ['linear'], ['zoom'], 14.5, 10.5, 17, 12.5],
+      'text-anchor': 'left',
+      'text-offset': [0.8, 0],
+      'text-max-width': 9,
+      'text-optional': true,
     },
     paint: {
-      'line-color': '#ffffff',
-      'line-width': 7,
-      'line-opacity': 0.85,
+      'text-color': '#3a3a3c',
+      'text-halo-color': 'rgba(255,255,255,0.95)',
+      'text-halo-width': 1.6,
     },
   })
-  layerIds.push(casingLayerId)
+}
 
-  // Add colored line layer
-  const lineLayerId = `${sourceId}-line`
-  map.value.addLayer({
-    id: lineLayerId,
-    type: 'line',
-    source: sourceId,
-    layout: {
-      'line-join': 'round',
-      'line-cap': 'round',
-    },
-    paint: {
-      'line-color': ['get', 'color'],
-      'line-width': 4,
-      'line-opacity': 1,
-    },
-  })
-  layerIds.push(lineLayerId)
+function render() {
+  const m = map?.value
+  if (!m || !mounted) return
+  const data = buildData()
+
+  if (m.getSource(LINE_SRC)) {
+    m.getSource(LINE_SRC).setData(data.lines)
+    m.getSource(STOP_SRC).setData(data.stops)
+  } else {
+    m.addSource(LINE_SRC, { type: 'geojson', data: data.lines })
+    m.addSource(STOP_SRC, { type: 'geojson', data: data.stops })
+    addLayers(m)
+    bindStopEvents(m)
+  }
+
+  for (const mk of terminusMarkers) mk.remove()
+  terminusMarkers = data.termini.map((t) =>
+    new maplibregl.Marker({ element: createTerminusPill(t.name, t.color), anchor: 'bottom', offset: [0, -6] })
+      .setLngLat(t.lngLat)
+      .addTo(m),
+  )
+}
+
+function clear() {
+  const m = map?.value
+  for (const mk of terminusMarkers) mk.remove()
+  terminusMarkers = []
+  stopPopup?.remove()
+  if (!m || !m.style) return
+  unbindStopEvents(m)
+  for (const id of [LABELS, STOPS, LINE, CASING]) if (m.getLayer(id)) m.removeLayer(id)
+  for (const id of [STOP_SRC, LINE_SRC]) if (m.getSource(id)) m.removeSource(id)
+}
+
+/** Colors / tram weight are baked into layer paint, so rebuild layers fully. */
+function rebuild() {
+  clear()
+  render()
 }
 
 onMounted(() => {
-  if (map?.value) {
-    drawRoute()
-  } else {
-    const stop = watch(
-      () => map?.value,
-      (m) => {
-        if (m) { drawRoute(); stop() }
-      },
-    )
-  }
+  mounted = true
+  if (map?.value) render()
 })
 
 onBeforeUnmount(() => {
-  clearRoute()
+  mounted = false
+  clear()
 })
 
-watch(() => props.routeData, drawRoute)
-watch(() => props.outwardColor, drawRoute)
-watch(() => props.returnColor, drawRoute)
-watch(() => props.direction, drawRoute)
+watch(() => map?.value, (m) => { if (m) render() })
+watch(() => [props.routeData, props.direction, props.outwardColor, props.returnColor], render)
+watch(() => props.isTram, rebuild)
 </script>
 
 <template>

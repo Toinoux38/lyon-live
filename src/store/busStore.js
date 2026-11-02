@@ -1,22 +1,38 @@
 import { defineStore } from 'pinia'
 import { fetchLines, fetchVehiclePositions, fetchLineDirections } from '@/api/tcl'
+import { isPickableLine } from '@/utils/lineGroup'
 
 const POLL_INTERVAL_MS = 6000
 const MAX_SELECTED = 3
+const MAX_RECENT = 6
 const STORAGE_KEY = 'tcl_recent_lines'
+
+// Non-reactive internals (kept out of Pinia state on purpose)
+let pollTimer = null
+let fetchSeq = 0
+const routeRequests = new Map() // lineId -> in-flight Promise
+
+function onVisibilityChange() {
+  const store = useBusStore()
+  // Catch up immediately when the user comes back to the tab
+  if (!document.hidden && store.isPolling) store.fetchVehicles()
+}
 
 export const useBusStore = defineStore('bus', {
   state: () => ({
-    /** @type {Array} All available bus lines from the API */
+    /** @type {Array} All lines from the API (every mode) */
     lines: [],
 
-    /** @type {Set<string>} IDs of currently selected lines */
+    /** @type {Set<string>} IDs of currently selected lines (insertion-ordered) */
     selectedLineIds: new Set(),
+
+    /** @type {Object<string, number>} lineId -> color slot index (stable while selected) */
+    lineSlots: {},
 
     /** @type {Array<string>} Recently selected line IDs (persisted) */
     recentLineIds: [],
 
-    /** @type {Array} Currently tracked vehicles (merged outward + return) */
+    /** @type {Array} Raw vehicles for the selected lines (both directions) */
     vehicles: [],
 
     /** @type {Map<string, Object>} Cached line route/direction data */
@@ -25,66 +41,75 @@ export const useBusStore = defineStore('bus', {
     /** @type {Object} Per-line direction filter: lineId -> 'both'|'outward'|'return' */
     lineDirectionMap: {},
 
-    /** @type {boolean} */
+    /** Bumped when the user picks a line, so the map can frame it. */
+    focusRequest: { lineId: null, seq: 0 },
+
+    /** @type {number|null} Timestamp of the last successful vehicle fetch */
+    lastUpdated: null,
+
     isLoadingLines: false,
-
-    /** @type {boolean} */
     isPolling: false,
-
     /** @type {string|null} */
     error: null,
-
-    /** @type {number|null} Internal polling timer */
-    _pollTimer: null,
   }),
 
   getters: {
-    /** Only BUS mode lines, sorted by short name. */
-    busLines(state) {
+    /** Bus + tram lines users can pick, sorted by short name. */
+    transitLines(state) {
       return state.lines
-        .filter((l) => l.mode === 'BUS')
-        .sort((a, b) => {
-          const aName = a.sName || ''
-          const bName = b.sName || ''
-          return aName.localeCompare(bName, 'fr', { numeric: true })
-        })
+        .filter(isPickableLine)
+        .sort((a, b) => (a.sName || '').localeCompare(b.sName || '', 'fr', { numeric: true }))
     },
 
-    /** Array version of selectedLineIds for reactivity. */
+    /** Array version of selectedLineIds (selection order). */
     selectedIds(state) {
       return [...state.selectedLineIds]
     },
 
-    /** Number of active lines. */
     activeLineCount(state) {
       return state.selectedLineIds.size
     },
 
-    /** Maximum number of concurrent lines. */
     maxLines() {
       return MAX_SELECTED
     },
 
-    /** True if no more lines can be selected. */
     maxReached(state) {
       return state.selectedLineIds.size >= MAX_SELECTED
     },
 
-    /** Map of lineId -> line object for quick lookup. */
+    /** lineId -> line object. */
     lineMap(state) {
       const map = {}
-      for (const line of state.lines) {
-        map[line.id] = line
-      }
+      for (const line of state.lines) map[line.id] = line
       return map
     },
 
-    /** Total vehicle count. */
-    vehicleCount(state) {
-      return state.vehicles.length
+    /**
+     * Vehicles that should be on the map: belong to a still-selected line and
+     * match that line's direction filter.
+     */
+    visibleVehicles(state) {
+      return state.vehicles.filter((v) => {
+        if (!state.selectedLineIds.has(v.lineId)) return false
+        const dir = state.lineDirectionMap[v.lineId] || 'both'
+        return dir === 'both' || v.direction === dir
+      })
     },
 
-    /** All cached route geometries for currently selected lines. */
+    vehicleCount() {
+      return this.visibleVehicles.length
+    },
+
+    tramCount() {
+      return this.visibleVehicles.filter((v) => v.mode === 'TRAM').length
+    },
+
+    busCount() {
+      return this.vehicleCount - this.tramCount
+    },
+
+    /** Cached route geometries for currently selected lines. */
     activeRoutes(state) {
       const routes = []
       for (const id of state.selectedLineIds) {
@@ -96,24 +121,16 @@ export const useBusStore = defineStore('bus', {
   },
 
   actions: {
-    /**
-     * Load recent line IDs from localStorage.
-     */
     loadRecentLines() {
       try {
-        const stored = localStorage.getItem(STORAGE_KEY)
-        if (stored) {
-          this.recentLineIds = JSON.parse(stored)
-        }
+        const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]')
+        this.recentLineIds = Array.isArray(stored) ? stored.filter((x) => typeof x === 'string') : []
       } catch (err) {
         console.warn('[busStore] Failed to load recent lines:', err)
         this.recentLineIds = []
       }
     },
 
-    /**
-     * Save recent line IDs to localStorage.
-     */
     saveRecentLines() {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(this.recentLineIds))
@@ -122,22 +139,11 @@ export const useBusStore = defineStore('bus', {
       }
     },
 
-    /**
-     * Add a line to recent selections.
-     */
     addToRecent(lineId) {
-      // Remove if already exists
-      this.recentLineIds = this.recentLineIds.filter(id => id !== lineId)
-      // Add to front
-      this.recentLineIds.unshift(lineId)
-      // Keep only last 5
-      this.recentLineIds = this.recentLineIds.slice(0, 5)
+      this.recentLineIds = [lineId, ...this.recentLineIds.filter((id) => id !== lineId)].slice(0, MAX_RECENT)
       this.saveRecentLines()
     },
 
-    /**
-     * Load all lines from the API.
-     */
     async loadLines() {
       if (this.isLoadingLines) return
       this.isLoadingLines = true
@@ -147,7 +153,7 @@ export const useBusStore = defineStore('bus', {
       try {
         this.lines = await fetchLines()
       } catch (err) {
-        this.error = `Failed to load lines: ${err.message}`
+        this.error = `Couldn't load lines: ${err.message}`
         console.error('[busStore] loadLines error:', err)
       } finally {
         this.isLoadingLines = false
@@ -155,10 +161,6 @@ export const useBusStore = defineStore('bus', {
     },
 
     /**
-     * Toggle a line in/out of the selection.
-     */
-    /**
-     * Set direction filter for a selected line.
      * @param {string} lineId
      * @param {'both'|'outward'|'return'} direction
      */
@@ -169,97 +171,90 @@ export const useBusStore = defineStore('bus', {
     toggleLine(lineId) {
       if (this.selectedLineIds.has(lineId)) {
         this.selectedLineIds.delete(lineId)
-        const { [lineId]: _, ...rest } = this.lineDirectionMap
-        this.lineDirectionMap = rest
+        const { [lineId]: _d, ...dirs } = this.lineDirectionMap
+        this.lineDirectionMap = dirs
+        const { [lineId]: _s, ...slots } = this.lineSlots
+        this.lineSlots = slots
+        // Drop that line's vehicles right away instead of waiting for the next poll
+        this.vehicles = this.vehicles.filter((v) => v.lineId !== lineId)
       } else {
-        if (this.selectedLineIds.size >= MAX_SELECTED) return // enforce limit
+        if (this.selectedLineIds.size >= MAX_SELECTED) return
+        // Take the lowest free color slot so other lines keep their colors
+        const used = new Set(Object.values(this.lineSlots))
+        let slot = 0
+        while (used.has(slot)) slot++
+        this.lineSlots = { ...this.lineSlots, [lineId]: slot }
         this.selectedLineIds.add(lineId)
         this.loadLineRoute(lineId)
         this.addToRecent(lineId)
+        this.focusRequest = { lineId, seq: this.focusRequest.seq + 1 }
       }
       this.fetchVehicles()
     },
 
-    /**
-     * Select lines up to the maximum allowed.
-     */
-    selectAll() {
-      for (const line of this.busLines) {
-        if (this.selectedLineIds.size >= MAX_SELECTED) break
-        if (!this.selectedLineIds.has(line.id)) {
-          this.selectedLineIds.add(line.id)
-        }
-      }
-      this.fetchVehicles()
-    },
-
-    /**
-     * Clear all selected lines and stop polling.
-     */
     clearSelection() {
       this.selectedLineIds.clear()
-      this.lineRoutes.clear()  // evict cached route geometry so next selection reloads fresh data
+      this.lineSlots = {}
       this.lineDirectionMap = {}
       this.vehicles = []
+      this.error = null
       this.stopPolling()
     },
 
-    /**
-     * Fetch and cache line route/directions data.
-     */
-    async loadLineRoute(lineId) {
-      if (this.lineRoutes.has(lineId)) return
-      try {
-        const data = await fetchLineDirections(lineId)
-        this.lineRoutes.set(lineId, data)
-      } catch (err) {
-        console.warn('[busStore] Failed to load route for', lineId, err)
-      }
+    /** Fetch and cache a line's route; concurrent calls share one request. */
+    loadLineRoute(lineId) {
+      if (this.lineRoutes.has(lineId)) return Promise.resolve()
+      if (routeRequests.has(lineId)) return routeRequests.get(lineId)
+
+      const req = fetchLineDirections(lineId)
+        .then((data) => { this.lineRoutes.set(lineId, data) })
+        .catch((err) => { console.warn('[busStore] Failed to load route for', lineId, err) })
+        .finally(() => { routeRequests.delete(lineId) })
+      routeRequests.set(lineId, req)
+      return req
     },
 
-    /**
-     * Fetch vehicle positions for all selected lines.
-     */
+    /** Fetch vehicle positions for all selected lines. Out-of-order responses are dropped. */
     async fetchVehicles() {
       const ids = [...this.selectedLineIds]
+      const seq = ++fetchSeq
       if (!ids.length) {
         this.vehicles = []
         return
       }
 
       try {
-        this.vehicles = await fetchVehiclePositions(ids)
+        const vehicles = await fetchVehiclePositions(ids)
+        if (seq !== fetchSeq) return // a newer request superseded this one
+        this.vehicles = vehicles.filter((v) => this.selectedLineIds.has(v.lineId))
+        this.lastUpdated = Date.now()
         this.error = null
       } catch (err) {
-        this.error = `Failed to fetch vehicles: ${err.message}`
+        if (seq !== fetchSeq) return
+        this.error = `Live data unavailable (${err.message})`
         console.error('[busStore] fetchVehicles error:', err)
       }
     },
 
     /**
-     * Start polling vehicle positions.
-     * Note: does NOT immediately fetch vehicles — the caller (toggleLine / watcher)
-     * already fired fetchVehicles() to avoid a double request on the first selection.
+     * Start polling vehicle positions. Does NOT fetch immediately — toggleLine
+     * already did. Skips ticks while the tab is hidden to save battery/data.
      */
     startPolling() {
-      if (this._pollTimer) return
+      if (pollTimer) return
       this.isPolling = true
-
-      this._pollTimer = setInterval(() => {
-        if (this.selectedLineIds.size > 0) {
-          this.fetchVehicles()
-        }
+      pollTimer = setInterval(() => {
+        if (this.selectedLineIds.size > 0 && !document.hidden) this.fetchVehicles()
       }, POLL_INTERVAL_MS)
+      document.addEventListener('visibilitychange', onVisibilityChange)
     },
 
-    /**
-     * Stop polling.
-     */
     stopPolling() {
-      if (this._pollTimer) {
-        clearInterval(this._pollTimer)
-        this._pollTimer = null
+      if (pollTimer) {
+        clearInterval(pollTimer)
+        pollTimer = null
       }
+      document.removeEventListener('visibilitychange', onVisibilityChange)
       this.isPolling = false
     },
   },

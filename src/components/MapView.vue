@@ -1,70 +1,58 @@
 <script setup>
 /**
- * MapView - MapLibre GL JS map wrapper
+ * MapView – MapLibre GL JS map wrapper.
  *
- * Initializes a MapLibre GL map centered on Lyon and provides the map instance
- * to child components via provide/inject.
+ * Initializes a MapLibre map centered on Lyon and provides the map instance
+ * to child components via provide/inject ('maplibreMap'). Children wait for
+ * the instance to be non-null, which happens once the style has loaded.
  */
 
-import { ref, provide, onMounted, onBeforeUnmount } from 'vue'
+import { ref, shallowRef, provide, onMounted, onBeforeUnmount } from 'vue'
 import maplibregl from 'maplibre-gl'
-import 'maplibre-gl/dist/maplibre-gl.css'
 
 const props = defineProps({
-  /** Initial center latitude */
   centerLat: { type: Number, default: 45.7580 },
-  /** Initial center longitude */
   centerLng: { type: Number, default: 4.8320 },
-  /** Initial zoom level */
   zoom: { type: Number, default: 13 },
 })
 
 const mapContainer = ref(null)
-const mapInstance = ref(null)
+// shallowRef: the map is a big mutable object, Vue must not deep-proxy it
+const mapInstance = shallowRef(null)
 
 provide('maplibreMap', mapInstance)
+
+let map = null
 
 onMounted(() => {
   if (!mapContainer.value) return
 
-  const map = new maplibregl.Map({
+  map = new maplibregl.Map({
     container: mapContainer.value,
     style: 'https://tiles.openfreemap.org/styles/positron',
     center: [props.centerLng, props.centerLat],
     zoom: props.zoom,
-    attributionControl: true,
+    minZoom: 9,
+    maxPitch: 0,
+    dragRotate: false,
+    attributionControl: { compact: true },
   })
+  map.touchZoomRotate.disableRotation()
 
-  // Navigation control (zoom buttons) top-right
   map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right')
 
   map.on('load', () => {
-    // Replace all text fonts with Metropolis
-    const style = map.getStyle()
-    for (const layer of style.layers) {
-      if (layer.layout && layer.layout['text-font']) {
-        const fonts = layer.layout['text-font']
-        const newFonts = fonts.map((f) =>
-          f.replace(/Noto Sans/gi, 'Metropolis')
-           .replace(/Roboto/gi, 'Metropolis')
-        )
-        map.setLayoutProperty(layer.id, 'text-font', newFonts)
-      }
-    }
     mapInstance.value = map
   })
 
-  // If map loads synchronously (style already cached), set immediately
-  if (map.loaded()) {
-    mapInstance.value = map
-  }
+  // Dev-only handle for poking at the map from the console
+  if (import.meta.env.DEV) window.__map = map
 })
 
 onBeforeUnmount(() => {
-  if (mapInstance.value) {
-    mapInstance.value.remove()
-    mapInstance.value = null
-  }
+  map?.remove()
+  map = null
+  mapInstance.value = null
 })
 
 defineExpose({ mapInstance })

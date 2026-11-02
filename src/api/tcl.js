@@ -72,7 +72,8 @@ export async function fetchLines() {
  * Queries both outward and return directions and merges the results.
  *
  * @param {string[]} lineIds - Array of full line IDs (e.g. "line:SYTNEX:C1")
- * @returns {Promise<Array<{ id: string, mode: string, bearing: number, latitude: number, longitude: number, direction: string }>>}
+ * @returns {Promise<Array<{ id: string, mode: string, bearing: number, latitude: number, longitude: number, lineId: string, direction: string }>>}
+ * @throws if every request failed
  */
 export async function fetchVehiclePositions(lineIds) {
   if (!lineIds.length) return []
@@ -81,21 +82,23 @@ export async function fetchVehiclePositions(lineIds) {
   // lineId it came from. A single combined request (lineIdsOutward: "C1,C13")
   // returns a flat array with no per-vehicle line info — forcing the caller to
   // guess via string matching, which breaks for prefix overlaps (C1 vs C13).
-  const requests = lineIds.flatMap((lineId) => [
-    get('lines/vehicleMonitoring', { lineIdsOutward: lineId })
-      .then((list) =>
-        (Array.isArray(list) ? list : []).map((v) => ({ ...v, lineId, direction: 'outward' })),
-      )
-      .catch(() => []),
-    get('lines/vehicleMonitoring', { lineIdsReturn: lineId })
-      .then((list) =>
-        (Array.isArray(list) ? list : []).map((v) => ({ ...v, lineId, direction: 'return' })),
-      )
-      .catch(() => []),
-  ])
+  const requests = lineIds.flatMap((lineId) =>
+    [['lineIdsOutward', 'outward'], ['lineIdsReturn', 'return']].map(([param, direction]) =>
+      get('lines/vehicleMonitoring', { [param]: lineId }).then((list) =>
+        (Array.isArray(list) ? list : []).map((v) => ({ ...v, lineId, direction })),
+      ),
+    ),
+  )
 
-  const results = await Promise.all(requests)
-  return results.flat()
+  // A single failed direction shouldn't blank the map, but if *everything*
+  // failed (offline, API down) the caller needs to know — otherwise the UI
+  // would claim "no vehicles running".
+  const results = await Promise.allSettled(requests)
+  const ok = results.filter((r) => r.status === 'fulfilled')
+  if (ok.length === 0) {
+    throw results[0]?.reason ?? new Error('All vehicle requests failed')
+  }
+  return ok.flatMap((r) => r.value)
 }
 
 /**

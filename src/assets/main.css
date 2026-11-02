@@ -6,29 +6,34 @@
 }
 
 /*
- * Bus marker styles (global -- MapLibre GL injects markers outside Vue scoped styles).
+ * Map overlay styles — global on purpose: MapLibre injects markers and popups
+ * outside of Vue's scoped styles.
  */
 
-.bus-marker-container {
-  background: none !important;
-  border: none !important;
+/* ---- Vehicle markers (bus = circle, tram = rounded square) ---------- */
+.veh-marker-container {
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
 
-.bus-marker {
+.veh-marker {
   position: relative;
   width: 36px;
   height: 36px;
   display: flex;
   align-items: center;
   justify-content: center;
+  transition: transform 0.12s ease;
 }
+.veh-marker-container:hover .veh-marker { transform: scale(1.12); }
 
-.bus-marker__dot {
+.veh-marker__body {
   position: relative;
-  width: 26px;
+  min-width: 26px;
   height: 26px;
+  padding: 0 3px;
   border-radius: 50%;
-  background: var(--bus-color, #c62828);
+  background: var(--veh-color, #c62828);
   border: 2.5px solid #ffffff;
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
   z-index: 2;
@@ -37,7 +42,26 @@
   justify-content: center;
 }
 
-.bus-marker__label {
+.veh-marker--tram .veh-marker__body {
+  min-width: 28px;
+  height: 24px;
+  border-radius: 8px;
+}
+/* Little "pantograph" tick on top of trams */
+.veh-marker--tram .veh-marker__body::before {
+  content: '';
+  position: absolute;
+  top: -6px;
+  left: 50%;
+  width: 8px;
+  height: 3px;
+  margin-left: -4px;
+  border-radius: 2px 2px 0 0;
+  background: #ffffff;
+  box-shadow: 0 -1px 2px rgba(0, 0, 0, 0.18);
+}
+
+.veh-marker__label {
   font-family: 'Figtree', sans-serif;
   font-size: 9px;
   font-weight: 800;
@@ -48,42 +72,158 @@
 }
 
 /*
- * Arrow pointing in the direction of travel.
- * --bearing is set inline: 0 = north (up), 90 = east (right), etc.
- * The arrow is a triangle drawn via borders, rotated around the center
- * of the dot so it orbits outside the circle.
+ * Arrow pointing in the direction of travel. --bearing: 0 = north, 90 = east.
+ * The triangle sits at the top of the 36px box and orbits its center.
  */
-.bus-marker__arrow {
+.veh-marker__arrow {
   position: absolute;
-  top: 0;
+  top: -2px;
   left: 50%;
   width: 0;
   height: 0;
   margin-left: -5px;
   border-left: 5px solid transparent;
   border-right: 5px solid transparent;
-  border-bottom: 9px solid var(--bus-color, #c62828);
+  border-bottom: 9px solid var(--veh-color, #c62828);
   z-index: 1;
-  /* Rotate around center of the .bus-marker (18px from top for 36px marker) */
-  transform-origin: 5px 18px;
+  transform-origin: 5px 20px;
   transform: rotate(var(--bearing, 0deg));
   filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.25));
 }
+.veh-marker--nobearing .veh-marker__arrow { display: none; }
 
-/* Popup */
-.bus-popup .maplibregl-popup-content {
-  border-radius: 10px;
-  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.14);
+/* ---- Vehicle popup -------------------------------------------------- */
+.veh-popup-wrap .maplibregl-popup-content,
+.stop-popup .maplibregl-popup-content {
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.16);
   padding: 10px 14px;
   font-family: 'Figtree', sans-serif;
 }
 
-.bus-popup .maplibregl-popup-tip {
-  border-top-color: #fff;
+.veh-popup {
+  min-width: 150px;
+  max-width: 230px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: #1c1c1e;
+}
+.veh-popup__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.veh-popup__badge {
+  flex-shrink: 0;
+  display: inline-flex;
+  gap: 2px;
+  height: 22px;
+  border-radius: 99px;
+  overflow: hidden;
+  font-size: 10px;
+  font-weight: 800;
+}
+.veh-popup__badge > span {
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  color: #fff;
+}
+.veh-popup__dest {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #3a3a3c;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.veh-popup__label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8e8e93;
+}
+.veh-popup__stop {
+  font-size: 13px;
+  font-weight: 600;
+}
+.veh-popup__muted { color: #8e8e93; font-weight: 500; }
+
+.stop-popup .maplibregl-popup-content { padding: 6px 10px; }
+.stop-popup__name {
+  font-size: 12px;
+  font-weight: 700;
+  color: #1c1c1e;
 }
 
-/* Route direction arrows */
-.route-arrow {
-  background: none !important;
-  border: none !important;
+/* ---- Terminus pill -------------------------------------------------- */
+.terminus-pill {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 11px 4px 9px;
+  border-radius: 99px;
+  background: var(--pill-color, #DC2626);
+  color: #ffffff;
+  font-family: 'Figtree', sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  border: 1.5px solid rgba(255, 255, 255, 0.5);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+}
+
+/* ---- User location -------------------------------------------------- */
+.user-loc {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  pointer-events: none;
+}
+.user-loc__pulse {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: #4285F4;
+  opacity: 0;
+  animation: user-loc-pulse 1.8s cubic-bezier(0.2, 0.6, 0.35, 1) infinite;
+}
+.user-loc__dot {
+  position: absolute;
+  inset: 2px;
+  border-radius: 50%;
+  background: #4285F4;
+  border: 2.5px solid #ffffff;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.3);
+}
+/* Heading cone, only shown when the device reports one */
+.user-loc__cone {
+  position: absolute;
+  left: 50%;
+  bottom: 50%;
+  width: 36px;
+  height: 30px;
+  margin-left: -18px;
+  transform-origin: 50% 100%;
+  transform: rotate(var(--heading, 0deg));
+  background: radial-gradient(ellipse at 50% 100%, rgba(66, 133, 244, 0.45), rgba(66, 133, 244, 0) 70%);
+  clip-path: polygon(50% 100%, 0 0, 100% 0);
+  display: none;
+}
+.user-loc--heading .user-loc__cone { display: block; }
+
+@keyframes user-loc-pulse {
+  0%   { transform: scale(1);   opacity: 0.35; }
+  80%  { transform: scale(3.2); opacity: 0; }
+  100% { transform: scale(3.2); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .user-loc__pulse { animation: none; }
+  .veh-marker { transition: none; }
 }
